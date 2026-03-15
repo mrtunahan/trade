@@ -131,3 +131,26 @@ DAILY_SUMMARY_HOUR = 21  # 21:00'de günlük özet
 # ==================== LOGLAMA ====================
 LOG_FILE  = "scanner.log"
 LOG_LEVEL = "INFO"
+
+# ==================== DOĞRULAMA ====================
+def validate_config():
+    """Başlangıçta konfigürasyon tutarlılığını kontrol eder."""
+    import logging as _log
+    _logger = _log.getLogger("Config")
+
+    enabled_count = sum(1 for c in CRITERIA.values() if c.get("enabled", False))
+    if enabled_count == 0:
+        _logger.warning("Hiçbir kriter aktif değil! Sinyal üretilemez.")
+    elif MIN_CRITERIA_MET > enabled_count:
+        _logger.warning(
+            f"MIN_CRITERIA_MET ({MIN_CRITERIA_MET}) aktif kriter sayısından ({enabled_count}) büyük! "
+            f"Sinyal üretilemez. MIN_CRITERIA_MET değerini düşürün veya daha fazla kriter aktif edin."
+        )
+
+    if not TELEGRAM_BOT_TOKEN:
+        _logger.warning("TELEGRAM_BOT_TOKEN ayarlanmamış!")
+    if not TELEGRAM_CHAT_ID:
+        _logger.warning("TELEGRAM_CHAT_ID ayarlanmamış!")
+
+
+validate_config()

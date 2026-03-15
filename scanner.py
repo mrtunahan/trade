@@ -114,6 +114,14 @@ class Scanner:
     def _set_cooldown(self, symbol: str):
         self.alert_cooldowns[symbol] = datetime.now()
 
+    def _cleanup_cooldowns(self):
+        """Süresi dolmuş cooldown kayıtlarını temizler."""
+        now = datetime.now()
+        expired = [sym for sym, t in self.alert_cooldowns.items()
+                   if (now - t).total_seconds() / 60 >= ALERT_COOLDOWN_MINUTES]
+        for sym in expired:
+            del self.alert_cooldowns[sym]
+
     # ==================== TARAMA DÖNGÜSÜ ====================
 
     def scan_once(self) -> list:
@@ -195,6 +203,11 @@ class Scanner:
             self.last_summary_date = today
             self.daily_signals = []  # Sıfırla
 
+        # Güvenlik: günlük sinyal listesini sınırla (bellek koruması)
+        if len(self.daily_signals) > 500:
+            logger.warning(f"Günlük sinyal listesi çok büyüdü ({len(self.daily_signals)}), kırpılıyor")
+            self.daily_signals = self.daily_signals[-500:]
+
     # ==================== ANA DÖNGÜ ====================
 
     def run(self):
@@ -231,6 +244,7 @@ class Scanner:
             try:
                 self.scan_once()
                 self.check_daily_summary()
+                self._cleanup_cooldowns()
             except Exception as e:
                 logger.error(f"Döngü hatası: {e}", exc_info=True)
                 self.telegram.send_error(f"Tarama hatası: {str(e)[:200]}")
