@@ -38,6 +38,10 @@ def generate_signal_chart(symbol: str, df: pd.DataFrame, indicators: dict) -> by
     Returns: PNG görsel bytes
     """
     try:
+        if df is None or len(df) < 10:
+            logger.warning(f"{symbol}: Grafik için yeterli veri yok (min 10 mum gerekli)")
+            return b""
+
         # Son 80 mumu göster
         df_plot = df.tail(80).copy()
 
@@ -70,26 +74,34 @@ def generate_signal_chart(symbol: str, df: pd.DataFrame, indicators: dict) -> by
         ema200 = indicators.get("ema_200")
 
         if ema9 is not None:
-            ema9_plot = ema9.reindex(df_plot.index)
-            ax1.plot(range(len(ema9_plot)), ema9_plot.values, color="#42a5f5", linewidth=1.2,
-                    label="EMA 9", alpha=0.9)
+            ema9_plot = ema9.reindex(df_plot.index).dropna()
+            if not ema9_plot.empty:
+                positions = [df_plot.index.get_loc(i) for i in ema9_plot.index]
+                ax1.plot(positions, ema9_plot.values, color="#42a5f5", linewidth=1.2,
+                        label="EMA 9", alpha=0.9)
         if ema21 is not None:
-            ema21_plot = ema21.reindex(df_plot.index)
-            ax1.plot(range(len(ema21_plot)), ema21_plot.values, color="#ffa726", linewidth=1.2,
-                    label="EMA 21", alpha=0.9)
+            ema21_plot = ema21.reindex(df_plot.index).dropna()
+            if not ema21_plot.empty:
+                positions = [df_plot.index.get_loc(i) for i in ema21_plot.index]
+                ax1.plot(positions, ema21_plot.values, color="#ffa726", linewidth=1.2,
+                        label="EMA 21", alpha=0.9)
         if ema200 is not None:
-            ema200_plot = ema200.reindex(df_plot.index)
-            ax1.plot(range(len(ema200_plot)), ema200_plot.values, color="#78909c", linewidth=1,
-                    label="EMA 200", linestyle="--", alpha=0.7)
+            ema200_plot = ema200.reindex(df_plot.index).dropna()
+            if not ema200_plot.empty:
+                positions = [df_plot.index.get_loc(i) for i in ema200_plot.index]
+                ax1.plot(positions, ema200_plot.values, color="#78909c", linewidth=1,
+                        label="EMA 200", linestyle="--", alpha=0.7)
 
         # Bollinger Bands
         bb_upper = indicators.get("bb_upper")
         bb_lower = indicators.get("bb_lower")
         if bb_upper is not None and bb_lower is not None:
-            bbu = bb_upper.reindex(df_plot.index)
-            bbl = bb_lower.reindex(df_plot.index)
-            ax1.fill_between(range(len(bbu)), bbu.values, bbl.values,
-                            alpha=0.08, color="#42a5f5")
+            bbu = bb_upper.reindex(df_plot.index).fillna(method="bfill")
+            bbl = bb_lower.reindex(df_plot.index).fillna(method="bfill")
+            mask = bbu.notna() & bbl.notna()
+            if mask.any():
+                ax1.fill_between(range(len(bbu)), bbu.values, bbl.values,
+                                where=mask.values, alpha=0.08, color="#42a5f5")
 
         # Son fiyat etiketi
         last_price = float(df_plot["close"].iloc[-1])
@@ -116,17 +128,20 @@ def generate_signal_chart(symbol: str, df: pd.DataFrame, indicators: dict) -> by
         if rsi is not None:
             rsi_plot = rsi.reindex(df_plot.index)
             rsi_vals = rsi_plot.values
+            valid_mask = ~np.isnan(rsi_vals)
             ax2.plot(range(len(rsi_vals)), rsi_vals, color="#ce93d8", linewidth=1.2)
             ax2.axhline(y=70, color="#ff1744", linewidth=0.7, linestyle="--", alpha=0.5)
             ax2.axhline(y=30, color="#00e676", linewidth=0.7, linestyle="--", alpha=0.5)
             ax2.fill_between(range(len(rsi_vals)), rsi_vals, 30,
-                            where=(rsi_vals < 30), alpha=0.15, color="#00e676")
+                            where=(valid_mask & (rsi_vals < 30)), alpha=0.15, color="#00e676")
             ax2.fill_between(range(len(rsi_vals)), rsi_vals, 70,
-                            where=(rsi_vals > 70), alpha=0.15, color="#ff1744")
+                            where=(valid_mask & (rsi_vals > 70)), alpha=0.15, color="#ff1744")
 
-            last_rsi = float(rsi_vals[-1])
-            ax2.text(len(rsi_vals) + 1, last_rsi, f" {last_rsi:.0f}",
-                    fontsize=9, color="#ce93d8", va="center")
+            last_rsi_val = rsi_vals[valid_mask]
+            if len(last_rsi_val) > 0:
+                last_rsi = float(last_rsi_val[-1])
+                ax2.text(len(rsi_vals) + 1, last_rsi, f" {last_rsi:.0f}",
+                        fontsize=9, color="#ce93d8", va="center")
 
         ax2.set_ylabel("RSI", fontsize=9)
         ax2.set_ylim(10, 90)
@@ -144,9 +159,11 @@ def generate_signal_chart(symbol: str, df: pd.DataFrame, indicators: dict) -> by
         # Volume MA
         vol_ma = indicators.get("vol_ma")
         if vol_ma is not None:
-            vma_plot = vol_ma.reindex(df_plot.index)
-            ax3.plot(range(len(vma_plot)), vma_plot.values, color="#ffa726",
-                    linewidth=1, alpha=0.7, label="Vol MA")
+            vma_plot = vol_ma.reindex(df_plot.index).dropna()
+            if not vma_plot.empty:
+                positions = [df_plot.index.get_loc(i) for i in vma_plot.index]
+                ax3.plot(positions, vma_plot.values, color="#ffa726",
+                        linewidth=1, alpha=0.7, label="Vol MA")
 
         ax3.set_ylabel("Hacim", fontsize=9)
         ax3.set_xlim(-1, len(df_plot) + 5)

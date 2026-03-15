@@ -7,6 +7,7 @@
 # ============================================================================
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -16,6 +17,15 @@ import pandas as pd
 from config import CRITERIA, MIN_CRITERIA_MET
 
 logger = logging.getLogger("Analyzer")
+
+
+def _safe_float(series, index=-1, default=float("nan")) -> float:
+    """Series'den güvenli float çıkarır, NaN ise default döndürür."""
+    try:
+        val = float(series.iloc[index])
+        return val if not math.isnan(val) else default
+    except (IndexError, TypeError, ValueError):
+        return default
 
 
 @dataclass
@@ -172,13 +182,27 @@ class TechnicalAnalyzer:
         fast = ind.get(fast_key, df["close"].ewm(span=cfg["fast"], adjust=False).mean())
         slow = ind.get(slow_key, df["close"].ewm(span=cfg["slow"], adjust=False).mean())
 
+        fast_now = _safe_float(fast, -1)
+        slow_now = _safe_float(slow, -1)
+        fast_prev = _safe_float(fast, -2)
+        slow_prev = _safe_float(slow, -2)
+
+        if math.isnan(fast_now) or math.isnan(slow_now) or math.isnan(fast_prev) or math.isnan(slow_prev):
+            return {"met": False, "detail": "EMA verisi yetersiz", "description": "Hesaplanamadı"}
+
         # Son mumda crossover oldu mu?
-        cross_up = float(fast.iloc[-1]) > float(slow.iloc[-1]) and float(fast.iloc[-2]) <= float(slow.iloc[-2])
+        cross_up = fast_now > slow_now and fast_prev <= slow_prev
 
         # Veya yakın zamanda (son 3 mum) crossover
         recent_cross = False
         for i in range(-3, 0):
-            if float(fast.iloc[i]) > float(slow.iloc[i]) and float(fast.iloc[i-1]) <= float(slow.iloc[i-1]):
+            f_cur = _safe_float(fast, i)
+            s_cur = _safe_float(slow, i)
+            f_prev = _safe_float(fast, i - 1)
+            s_prev = _safe_float(slow, i - 1)
+            if math.isnan(f_cur) or math.isnan(s_cur) or math.isnan(f_prev) or math.isnan(s_prev):
+                continue
+            if f_cur > s_cur and f_prev <= s_prev:
                 recent_cross = True
                 break
 
@@ -186,14 +210,17 @@ class TechnicalAnalyzer:
 
         return {
             "met": met,
-            "detail": f"EMA{cfg['fast']}={'%.4f' % float(fast.iloc[-1])}, EMA{cfg['slow']}={'%.4f' % float(slow.iloc[-1])}",
+            "detail": f"EMA{cfg['fast']}={fast_now:.4f}, EMA{cfg['slow']}={slow_now:.4f}",
             "description": "EMA yukarı kesişim" if met else "Kesişim yok",
         }
 
     def _check_rsi(self, df, ind, cfg) -> dict:
         """RSI kontrolü."""
-        rsi_val = float(ind["rsi"].iloc[-1])
-        prev_rsi = float(ind["rsi"].iloc[-2]) if len(ind["rsi"]) > 1 else rsi_val
+        rsi_val = _safe_float(ind["rsi"], -1)
+        prev_rsi = _safe_float(ind["rsi"], -2, default=rsi_val)
+
+        if math.isnan(rsi_val):
+            return {"met": False, "detail": "RSI verisi yetersiz", "description": "Hesaplanamadı"}
 
         # Aşırı satım bölgesinden çıkış
         oversold_bounce = prev_rsi <= cfg["oversold"] and rsi_val > cfg["oversold"]
@@ -212,13 +239,20 @@ class TechnicalAnalyzer:
 
     def _check_macd(self, df, ind, cfg) -> dict:
         """MACD kontrolü."""
-        macd_line = float(ind["macd_line"].iloc[-1])
-        macd_signal = float(ind["macd_signal"].iloc[-1])
-        macd_hist = float(ind["macd_hist"].iloc[-1])
-        prev_hist = float(ind["macd_hist"].iloc[-2]) if len(ind["macd_hist"]) > 1 else 0
+        macd_line = _safe_float(ind["macd_line"], -1)
+        macd_signal = _safe_float(ind["macd_signal"], -1)
+        macd_hist = _safe_float(ind["macd_hist"], -1)
+        prev_hist = _safe_float(ind["macd_hist"], -2, default=0.0)
+        prev_macd = _safe_float(ind["macd_line"], -2)
+        prev_signal = _safe_float(ind["macd_signal"], -2)
+
+        if math.isnan(macd_line) or math.isnan(macd_signal) or math.isnan(macd_hist):
+            return {"met": False, "detail": "MACD verisi yetersiz", "description": "Hesaplanamadı"}
 
         # MACD sinyal çizgisini yukarı kesiyor veya histogram pozitife dönüyor
-        cross_up = macd_line > macd_signal and float(ind["macd_line"].iloc[-2]) <= float(ind["macd_signal"].iloc[-2])
+        cross_up = (macd_line > macd_signal and
+                    not math.isnan(prev_macd) and not math.isnan(prev_signal) and
+                    prev_macd <= prev_signal)
         hist_turn = prev_hist < 0 and macd_hist > 0
 
         met = cross_up or hist_turn
@@ -232,9 +266,12 @@ class TechnicalAnalyzer:
     def _check_bollinger(self, df, ind, cfg) -> dict:
         """Bollinger Bands kontrolü."""
         close = float(df["close"].iloc[-1])
-        bb_lower = float(ind["bb_lower"].iloc[-1])
-        bb_upper = float(ind["bb_upper"].iloc[-1])
-        bb_pct = float(ind["bb_pct"].iloc[-1])
+        bb_lower = _safe_float(ind["bb_lower"], -1)
+        bb_upper = _safe_float(ind["bb_upper"], -1)
+        bb_pct = _safe_float(ind["bb_pct"], -1)
+
+        if math.isnan(bb_lower) or math.isnan(bb_upper) or math.isnan(bb_pct):
+            return {"met": False, "detail": "Bollinger verisi yetersiz", "description": "Hesaplanamadı"}
 
         # Alt banda dokunma veya altına inme
         met = close <= bb_lower * 1.005  # %0.5 tolerans
@@ -247,7 +284,11 @@ class TechnicalAnalyzer:
 
     def _check_volume_spike(self, df, ind, cfg) -> dict:
         """Hacim artışı kontrolü."""
-        vol_ratio = float(ind["vol_ratio"].iloc[-1])
+        vol_ratio = _safe_float(ind["vol_ratio"], -1)
+
+        if math.isnan(vol_ratio):
+            return {"met": False, "detail": "Hacim verisi yetersiz", "description": "Hesaplanamadı"}
+
         met = vol_ratio >= cfg["multiplier"]
 
         return {
@@ -260,7 +301,11 @@ class TechnicalAnalyzer:
         """Trend yönü filtresi (200 EMA)."""
         close = float(df["close"].iloc[-1])
         ema_key = f"ema_{cfg['ema_period']}"
-        ema_val = float(ind.get(ema_key, df["close"].ewm(span=cfg["ema_period"], adjust=False).mean()).iloc[-1])
+        ema_series = ind.get(ema_key, df["close"].ewm(span=cfg["ema_period"], adjust=False).mean())
+        ema_val = _safe_float(ema_series, -1)
+
+        if math.isnan(ema_val) or ema_val == 0:
+            return {"met": False, "detail": "EMA verisi yetersiz", "description": "Hesaplanamadı"}
 
         if cfg["mode"] == "above":
             met = close > ema_val
@@ -280,7 +325,11 @@ class TechnicalAnalyzer:
     def _check_support_resistance(self, df, ind, cfg) -> dict:
         """Destek seviyesine yakınlık kontrolü."""
         close = float(df["close"].iloc[-1])
-        support = float(ind["support"].iloc[-1])
+        support = _safe_float(ind["support"], -1)
+
+        if math.isnan(support) or support <= 0:
+            return {"met": False, "detail": "Destek verisi yetersiz", "description": "Hesaplanamadı"}
+
         proximity = abs(close - support) / support * 100
 
         met = proximity <= cfg["proximity_pct"]
@@ -293,13 +342,15 @@ class TechnicalAnalyzer:
 
     def _check_stoch_rsi(self, df, ind, cfg) -> dict:
         """Stochastic RSI kontrolü."""
-        k_val = float(ind["stoch_rsi_k"].iloc[-1])
-        d_val = float(ind["stoch_rsi_d"].iloc[-1])
+        k_val = _safe_float(ind["stoch_rsi_k"], -1)
+        d_val = _safe_float(ind["stoch_rsi_d"], -1)
+        prev_k = _safe_float(ind["stoch_rsi_k"], -2)
+        prev_d = _safe_float(ind["stoch_rsi_d"], -2)
+
+        if math.isnan(k_val) or math.isnan(d_val) or math.isnan(prev_k) or math.isnan(prev_d):
+            return {"met": False, "detail": "StochRSI verisi yetersiz", "description": "Hesaplanamadı"}
 
         # K çizgisi D'yi yukarı kesiyor ve aşırı satım bölgesinde
-        prev_k = float(ind["stoch_rsi_k"].iloc[-2])
-        prev_d = float(ind["stoch_rsi_d"].iloc[-2])
-
         cross_up = k_val > d_val and prev_k <= prev_d
         in_oversold = k_val <= cfg["oversold"] or d_val <= cfg["oversold"]
 
