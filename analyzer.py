@@ -14,7 +14,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from config import CRITERIA, MIN_CRITERIA_MET
+from config import CRITERIA, MIN_CRITERIA_MET, MIN_SIGNAL_STRENGTH_PCT
 
 logger = logging.getLogger("Analyzer")
 
@@ -65,12 +65,13 @@ class Signal:
     """Bir sinyal sonucu."""
     symbol: str
     signal_type: str          # "buy", "sell", "info"
-    strength: int             # Kaç kriter sağlandı
-    total_criteria: int       # Toplam aktif kriter sayısı
+    strength: int             # Ağırlıklı puan toplamı
+    total_criteria: int       # Toplam ağırlık puanı
     price: float
     criteria_met: list        # Sağlanan kriterlerin isimleri
     criteria_details: dict    # Her kriterin detay bilgisi
     indicators: dict          # Hesaplanan indikatör değerleri
+    strength_pct: float = 0.0  # Ağırlıklı güç yüzdesi (0.0 - 1.0)
 
 
 class TechnicalAnalyzer:
@@ -95,7 +96,8 @@ class TechnicalAnalyzer:
             # Her kriteri kontrol et
             criteria_met = []
             criteria_details = {}
-            active_count = 0
+            total_weight = 0
+            earned_weight = 0
 
             checks = {
                 "ema_cross":          self._check_ema_cross,
@@ -114,24 +116,37 @@ class TechnicalAnalyzer:
                 if not cfg.get("enabled", False):
                     continue
 
-                active_count += 1
+                weight = cfg.get("weight", 1)
+                total_weight += weight
                 result = check_fn(df, indicators, cfg)
 
                 if result["met"]:
                     criteria_met.append(name)
+                    earned_weight += weight
                 criteria_details[name] = result
 
-            # Yeterli kriter sağlandı mı?
-            if len(criteria_met) >= self.min_criteria and active_count > 0:
+            # Zorunlu kriter kontrolü: OCC (veya required=True olan herhangi bir kriter)
+            for name, cfg in self.criteria.items():
+                if cfg.get("enabled", False) and cfg.get("required", False):
+                    if name not in criteria_met:
+                        # Zorunlu kriter sağlanmadıysa sinyal üretme
+                        return None
+
+            # Ağırlıklı güç yüzdesi
+            strength_pct = earned_weight / total_weight if total_weight > 0 else 0.0
+
+            # Minimum kriter sayısı ve güç eşiği kontrolü
+            if len(criteria_met) >= self.min_criteria and total_weight > 0:
                 return Signal(
                     symbol=symbol,
                     signal_type="buy",
-                    strength=len(criteria_met),
-                    total_criteria=active_count,
+                    strength=earned_weight,
+                    total_criteria=total_weight,
                     price=float(df["close"].iloc[-1]),
                     criteria_met=criteria_met,
                     criteria_details=criteria_details,
                     indicators=indicators,
+                    strength_pct=strength_pct,
                 )
 
             return None
@@ -265,26 +280,42 @@ class TechnicalAnalyzer:
         }
 
     def _check_rsi(self, df, ind, cfg) -> dict:
-        """RSI kontrolü."""
+        """RSI kontrolü — genişletilmiş alım bölgesi."""
         rsi_val = _safe_float(ind["rsi"], -1)
         prev_rsi = _safe_float(ind["rsi"], -2, default=rsi_val)
 
         if math.isnan(rsi_val):
             return {"met": False, "detail": "RSI verisi yetersiz", "description": "Hesaplanamadı"}
 
-        # Aşırı satım bölgesinden çıkış
-        oversold_bounce = prev_rsi <= cfg["oversold"] and rsi_val > cfg["oversold"]
-        # Veya hâlâ aşırı satım bölgesinde
-        in_oversold = rsi_val <= cfg["oversold"]
+        oversold = cfg["oversold"]                    # 30
+        oversold_zone = cfg.get("oversold_zone", 40)  # 30-40 arası potansiyel bölge
 
-        met = oversold_bounce or in_oversold
+        # Aşırı satım bölgesinden çıkış (< 30 → > 30)
+        oversold_bounce = prev_rsi <= oversold and rsi_val > oversold
+        # Hâlâ aşırı satım bölgesinde (< 30)
+        in_oversold = rsi_val <= oversold
+        # Potansiyel alım bölgesi (30-40 arası ve yükseliyor)
+        in_buy_zone = oversold < rsi_val <= oversold_zone and rsi_val > prev_rsi
 
-        zone = "Aşırı satım" if rsi_val <= cfg["oversold"] else "Nötr" if rsi_val < cfg["overbought"] else "Aşırı alım"
+        met = oversold_bounce or in_oversold or in_buy_zone
+
+        if rsi_val <= oversold:
+            zone = "Aşırı satım"
+        elif rsi_val <= oversold_zone:
+            zone = "Alım bölgesi"
+        elif rsi_val < cfg["overbought"]:
+            zone = "Nötr"
+        else:
+            zone = "Aşırı alım"
+
+        desc = f"RSI {zone}"
+        if in_buy_zone:
+            desc = f"RSI Alım bölgesi (yükseliyor)"
 
         return {
             "met": met,
             "detail": f"RSI={rsi_val:.1f}",
-            "description": f"RSI {zone}",
+            "description": desc,
         }
 
     def _check_macd(self, df, ind, cfg) -> dict:

@@ -16,6 +16,7 @@ from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     SEND_CHART_IMAGE,
+    MIN_SIGNAL_STRENGTH_PCT,
 )
 
 logger = logging.getLogger("Telegram")
@@ -79,22 +80,19 @@ class TelegramNotifier:
     def send_signal(self, signal, chart_bytes: Optional[bytes] = None) -> bool:
         """
         Sinyal bildirimini Telegram'a gönderir.
-        signal: analyzer.Signal nesnesi
+        signal: analyzer.Signal nesnesi (ağırlıklı puanlama sistemi)
         """
-        # Sinyal gücü emoji
-        strength_ratio = signal.strength / signal.total_criteria
-        if strength_ratio >= 0.8:
+        # Ağırlıklı güç yüzdesi
+        strength_pct = signal.strength_pct
+        if strength_pct >= 0.95:
             strength_emoji = "🔥🔥🔥"
-            strength_text = "Çok Güçlü"
-        elif strength_ratio >= 0.6:
+            strength_text = "Mükemmel"
+        elif strength_pct >= 0.90:
             strength_emoji = "🔥🔥"
-            strength_text = "Güçlü"
-        elif strength_ratio >= 0.4:
-            strength_emoji = "🔥"
-            strength_text = "Orta"
+            strength_text = "Çok Güçlü"
         else:
-            strength_emoji = "⚡"
-            strength_text = "Zayıf"
+            strength_emoji = "🔥"
+            strength_text = "Güçlü"
 
         # Parite bilgisi
         quote = "TRY" if signal.symbol.endswith("TRY") else "USDT"
@@ -128,7 +126,7 @@ class TelegramNotifier:
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"\n"
             f"💰 <b>Fiyat:</b> {signal.price:,.4f} {quote}\n"
-            f"📊 <b>Güç:</b> {strength_text} ({signal.strength}/{signal.total_criteria})\n"
+            f"📊 <b>Güç:</b> {strength_text} ({signal.strength}/{signal.total_criteria} puan — %{strength_pct*100:.0f})\n"
             f"📉 <b>RSI:</b> {rsi_str}\n"
             f"{change_emoji} <b>24s Değişim:</b> {change_24h:+.2f}%\n"
             f"\n"
@@ -210,9 +208,10 @@ class TelegramNotifier:
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"\n"
             f"📊 Takip edilen parite: {pair_count}\n"
+            f"🎯 Min sinyal gücü: %{MIN_SIGNAL_STRENGTH_PCT*100:.0f}\n"
             f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"\n"
-            f"Tarama başladı..."
+            f"Sadece güçlü sinyaller bildirilecek..."
         )
         return self.send_message(message)
 
@@ -238,6 +237,7 @@ class TelegramNotifier:
             "trend_filter": "Trend Filtresi",
             "support_resistance": "Destek/Direnç",
             "stoch_rsi": "Stochastic RSI",
+            "occ": "OCC",
         }
         return names.get(name, name)
 

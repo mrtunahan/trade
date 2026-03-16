@@ -58,14 +58,17 @@ CRITERIA = {
         "enabled": True,
         "fast": 9,
         "slow": 21,
+        "weight": 1,              # Ağırlık puanı
     },
 
     # --- RSI ---
     "rsi": {
         "enabled": True,
         "period": 14,
-        "oversold": 30,       # Bu değerin altına düşünce sinyal
-        "overbought": 70,     # Bu değerin üstüne çıkınca uyarı
+        "oversold": 30,           # Aşırı satım (güçlü sinyal)
+        "oversold_zone": 40,      # Potansiyel alım bölgesi (30-40 arası)
+        "overbought": 70,
+        "weight": 1,
     },
 
     # --- MACD ---
@@ -74,60 +77,79 @@ CRITERIA = {
         "fast": 12,
         "slow": 26,
         "signal": 9,
+        "weight": 1,
     },
 
     # --- Bollinger Bands ---
     "bollinger": {
-        "enabled": False,
+        "enabled": True,
         "period": 20,
         "std_dev": 2.0,
+        "weight": 1,
     },
 
     # --- Volume Spike ---
     "volume_spike": {
         "enabled": True,
         "ma_period": 20,
-        "multiplier": 2.0,    # Ortalama hacmin kaç katı
+        "multiplier": 1.5,        # 2.0'dan 1.5'e düşürüldü (daha hassas)
+        "weight": 1,
     },
 
     # --- Trend Filtresi (200 EMA) ---
     "trend_filter": {
         "enabled": True,
         "ema_period": 200,
-        "mode": "above",      # "above" = fiyat EMA üstünde, "below", "both"
+        "mode": "above",
+        "weight": 2,              # Trend yönü çok önemli → 2 puan
     },
 
     # --- Destek/Direnç Yakınlığı ---
     "support_resistance": {
         "enabled": False,
-        "lookback": 50,       # Kaç mum geriye bak
-        "proximity_pct": 1.0, # Destek/dirence yakınlık %
+        "lookback": 50,
+        "proximity_pct": 1.0,
+        "weight": 1,
     },
 
     # --- Stochastic RSI ---
     "stoch_rsi": {
-        "enabled": False,
+        "enabled": True,
         "period": 14,
         "k_period": 3,
         "d_period": 3,
         "oversold": 20,
         "overbought": 80,
+        "weight": 1,
     },
 
     # --- OCC (Open Close Cross) Non-Repaint ---
     # Close MA ve Open MA kesişimine dayalı sinyal.
     # JustUncleL'ın OCC Alert R6.2 indikatöründen esinlenilmiştir.
     # Non-repaint: Sadece kapanmış mumlara bakılır.
+    # ZORUNLU KRİTER: OCC sağlanmadan sinyal üretilmez.
     "occ": {
         "enabled": True,
-        "period": 5,              # MA periyodu
-        "ma_type": "EMA",         # "SMA", "EMA", "DEMA", "TEMA", "WMA", "HMA"
-        "min_strength": 0.01,     # Minimum cross strength % (zayıf sinyalleri filtrele)
+        "period": 5,
+        "ma_type": "EMA",
+        "min_strength": 0.01,
+        "weight": 2,              # Ana sinyal üreticisi → 2 puan
+        "required": True,         # ZORUNLU: OCC olmadan sinyal üretilmez
     },
 }
 
-# Kaç kriter aynı anda sağlanmalı (minimum)
-MIN_CRITERIA_MET = 2
+# ==================== AĞIRLIKLI PUANLAMA ====================
+# Toplam ağırlık: OCC(2) + Trend(2) + EMA(1) + RSI(1) + MACD(1) + Bollinger(1) + Hacim(1) + StochRSI(1) = 10
+# %90 eşik = minimum 9 puan gerekli
+# Bu, neredeyse tüm kriterlerin sağlanmasını gerektirir.
+
+# Minimum ağırlıklı puan yüzdesi (0.0 - 1.0)
+# Sadece bu eşiğin üstündeki sinyaller Telegram'a gönderilir
+MIN_SIGNAL_STRENGTH_PCT = 0.90  # %90 — sadece çok güçlü sinyaller
+
+# Eski MIN_CRITERIA_MET artık ağırlıklı sistemde kullanılmıyor ama
+# analyzer.py'de geriye uyumluluk için tutuluyor (3 olarak).
+MIN_CRITERIA_MET = 3
 
 # ==================== BİLDİRİM AYARLARI ====================
 # Aynı parite için tekrar bildirim gönderme süresi (dakika)
@@ -150,13 +172,14 @@ def validate_config():
     _logger = _log.getLogger("Config")
 
     enabled_count = sum(1 for c in CRITERIA.values() if c.get("enabled", False))
+    total_weight = sum(c.get("weight", 1) for c in CRITERIA.values() if c.get("enabled", False))
+    required_count = sum(1 for c in CRITERIA.values() if c.get("enabled", False) and c.get("required", False))
+
     if enabled_count == 0:
         _logger.warning("Hiçbir kriter aktif değil! Sinyal üretilemez.")
-    elif MIN_CRITERIA_MET > enabled_count:
-        _logger.warning(
-            f"MIN_CRITERIA_MET ({MIN_CRITERIA_MET}) aktif kriter sayısından ({enabled_count}) büyük! "
-            f"Sinyal üretilemez. MIN_CRITERIA_MET değerini düşürün veya daha fazla kriter aktif edin."
-        )
+
+    _logger.info(f"Aktif kriterler: {enabled_count}, Toplam ağırlık: {total_weight}, "
+                 f"Zorunlu kriterler: {required_count}, Min sinyal gücü: %{MIN_SIGNAL_STRENGTH_PCT*100:.0f}")
 
     if not TELEGRAM_BOT_TOKEN:
         _logger.warning("TELEGRAM_BOT_TOKEN ayarlanmamış!")

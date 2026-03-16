@@ -24,6 +24,7 @@ from config import (
     DAILY_SUMMARY_HOUR,
     LOG_FILE, LOG_LEVEL,
     SEND_CHART_IMAGE,
+    MIN_SIGNAL_STRENGTH_PCT,
 )
 from market_data import MarketData
 from analyzer import TechnicalAnalyzer
@@ -149,13 +150,22 @@ class Scanner:
                 signal = self.analyzer.analyze(symbol, df)
 
                 if signal:
+                    # Güç eşiği kontrolü — sadece %90+ sinyal gönder
+                    if signal.strength_pct < MIN_SIGNAL_STRENGTH_PCT:
+                        logger.debug(
+                            f"{symbol}: Sinyal var ama güç yetersiz "
+                            f"(%{signal.strength_pct*100:.0f} < %{MIN_SIGNAL_STRENGTH_PCT*100:.0f})"
+                        )
+                        continue
+
                     # Cooldown kontrolü
                     if self._is_on_cooldown(symbol):
                         logger.debug(f"{symbol}: Sinyal var ama cooldown'da")
                         continue
 
                     logger.info(
-                        f"🔔 SİNYAL: {symbol} | Güç: {signal.strength}/{signal.total_criteria} | "
+                        f"🔔 SİNYAL: {symbol} | Güç: {signal.strength}/{signal.total_criteria} "
+                        f"(%{signal.strength_pct*100:.0f}) | "
                         f"Fiyat: {signal.price:,.4f} | Kriterler: {', '.join(signal.criteria_met)}"
                     )
 
@@ -217,6 +227,7 @@ class Scanner:
         logger.info(f"   Tarama aralığı: {SCAN_INTERVAL}s")
         logger.info(f"   Zaman dilimi: {KLINE_INTERVAL}")
         logger.info(f"   Cooldown: {ALERT_COOLDOWN_MINUTES}dk")
+        logger.info(f"   Min sinyal gücü: %{MIN_SIGNAL_STRENGTH_PCT*100:.0f}")
         logger.info("=" * 60)
 
         # Bağlantı testleri
