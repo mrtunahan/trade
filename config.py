@@ -136,11 +136,72 @@ CRITERIA = {
         "weight": 2,              # Ana sinyal üreticisi → 2 puan
         "required": True,         # ZORUNLU: OCC olmadan sinyal üretilmez
     },
+
+    # --- Market Rejimi (ADX Bazlı) ---
+    # ADX > 25 → Trend piyasa (trend kriterlerine daha fazla ağırlık)
+    # ADX < 20 → Yatay piyasa (Bollinger/StochRSI'a daha fazla ağırlık)
+    "market_regime": {
+        "enabled": True,
+        "adx_period": 14,
+        "trend_threshold": 25,     # ADX > 25 → Güçlü trend
+        "range_threshold": 20,     # ADX < 20 → Yatay piyasa
+        "weight": 0,               # Kendi puanı yok, diğer ağırlıkları dinamik ayarlar
+    },
+
+    # --- Multi-Timeframe Doğrulama ---
+    # Bir üst zaman diliminde trend yönü doğrulaması
+    # Örn: 1H'de OCC Long geldiğinde, 4H'de de trendin yukarı olması
+    "multi_timeframe": {
+        "enabled": True,
+        "higher_tf": "4h",         # Üst zaman dilimi (1h → 4h, 15m → 1h)
+        "weight": 2,               # Önemli doğrulama → 2 puan
+    },
+
+    # --- Zaman Filtresi (Seans Bazlı) ---
+    # Düşük hacimli saatlerde sinyal kalitesi düşer
+    "time_filter": {
+        "enabled": True,
+        "high_volume_hours_utc": [(13, 21)],   # Avrupa+Amerika örtüşmesi (UTC)
+        "low_volume_penalty": True,             # Düşük hacim saatlerinde eşiği yükselt
+        "weight": 0,                            # Puan vermez, filtre olarak çalışır
+    },
+
+    # --- BTC Dominans Filtresi ---
+    # BTC düşüşte/dominans yükselişte iken altcoin long sinyallerini baskıla
+    "btc_filter": {
+        "enabled": True,
+        "weight": 0,               # Puan vermez, filtre/eşik ayarlayıcı olarak çalışır
+    },
+
+    # --- Confluence Window (Sinyal Çakışma Penceresi) ---
+    # OCC tetiklendikten sonra 3 mum içinde diğer kriterlerin tamamlanmasını bekle
+    "confluence_window": {
+        "enabled": True,
+        "window_candles": 3,       # OCC'den sonra kaç mum içinde tamamlanmalı
+    },
+
+    # --- Cooldown (Mum Bazlı) ---
+    # Sinyal sonrası belirli mum sayısı kadar yeni sinyal üretme
+    "candle_cooldown": {
+        "enabled": True,
+        "cooldown_candles": 5,     # Sinyal sonrası 5 mum sessizlik
+    },
+
+    # --- Çıkış Stratejisi Puanlaması ---
+    # Giriş gibi puanlama sistemiyle kademeli çıkış sinyali
+    "exit_strategy": {
+        "enabled": True,
+        "occ_reverse_weight": 2,    # OCC ters kesişim
+        "rsi_overbought_weight": 1, # RSI aşırı alım
+        "volume_drop_weight": 1,    # Hacim düşüşü
+        "stoch_overbought_weight": 1,  # StochRSI aşırı alım
+        "min_exit_score": 3,        # Minimum çıkış puanı
+    },
 }
 
 # ==================== AĞIRLIKLI PUANLAMA ====================
-# Toplam ağırlık: OCC(2) + Trend(2) + EMA(1) + RSI(1) + MACD(1) + Bollinger(1) + Hacim(1) + StochRSI(1) = 10
-# %90 eşik = minimum 9 puan gerekli
+# Toplam ağırlık: OCC(2) + Trend(2) + EMA(1) + RSI(1) + MACD(1) + Bollinger(1) + Hacim(1) + StochRSI(1) + MTF(2) = 12
+# %90 eşik = minimum ~11 puan gerekli
 # Bu, neredeyse tüm kriterlerin sağlanmasını gerektirir.
 
 # Minimum ağırlıklı puan yüzdesi (0.0 - 1.0)

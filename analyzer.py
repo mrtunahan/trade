@@ -1,9 +1,9 @@
 # ============================================================================
-# analyzer.py - Teknik Analiz Motoru
+# analyzer.py - Teknik Analiz Motoru (Geliştirilmiş v2)
 # ============================================================================
 # Mum verisinden indikatörler hesaplar ve kriter kontrolü yapar.
-# Yeni kriterler eklemek için analyze() ve _check_* fonksiyonlarını
-# genişletin.
+# v2: ADX market rejimi, ATR adaptif eşikler, confluence window,
+#     çıkış stratejisi puanlaması, dinamik ağırlık sistemi
 # ============================================================================
 
 import logging
@@ -64,7 +64,7 @@ def _calc_ma(series: pd.Series, period: int, ma_type: str = "EMA") -> pd.Series:
 class Signal:
     """Bir sinyal sonucu."""
     symbol: str
-    signal_type: str          # "buy", "sell", "info"
+    signal_type: str          # "buy", "sell", "info", "exit"
     strength: int             # Ağırlıklı puan toplamı
     total_criteria: int       # Toplam ağırlık puanı
     price: float
@@ -72,6 +72,9 @@ class Signal:
     criteria_details: dict    # Her kriterin detay bilgisi
     indicators: dict          # Hesaplanan indikatör değerleri
     strength_pct: float = 0.0  # Ağırlıklı güç yüzdesi (0.0 - 1.0)
+    market_regime: str = "unknown"  # "trending", "ranging", "transition"
+    exit_score: int = 0       # Çıkış stratejisi puanı
+    exit_details: dict = field(default_factory=dict)  # Çıkış detayları
 
 
 class TechnicalAnalyzer:
@@ -80,10 +83,18 @@ class TechnicalAnalyzer:
     def __init__(self, criteria: dict = None):
         self.criteria = criteria or CRITERIA
         self.min_criteria = MIN_CRITERIA_MET
+        # Confluence window: sembol bazında OCC tetiklenme zamanı
+        self._occ_trigger_candles = {}  # {symbol: candle_count_since_occ}
+        # Candle cooldown: sembol bazında son sinyal sonrası mum sayısı
+        self._signal_candle_counts = {}  # {symbol: candles_since_signal}
 
-    def analyze(self, symbol: str, df: pd.DataFrame) -> Optional[Signal]:
+    def analyze(self, symbol: str, df: pd.DataFrame,
+                htf_df: pd.DataFrame = None,
+                btc_df: pd.DataFrame = None) -> Optional[Signal]:
         """
         Bir parite için tüm kriterleri çalıştırır.
+        htf_df: Üst zaman dilimi DataFrame (multi-timeframe doğrulama için)
+        btc_df: BTC mum verisi (BTC dominans filtresi için)
         Returns: Signal nesnesi veya None (sinyal yoksa)
         """
         if df is None or len(df) < 50:
@@ -92,6 +103,36 @@ class TechnicalAnalyzer:
         try:
             # İndikatörleri hesapla
             indicators = self._calculate_indicators(df)
+
+            # Market rejimi algıla (ADX bazlı)
+            market_regime = self._detect_market_regime(indicators)
+            indicators["market_regime"] = market_regime
+
+            # Dinamik ağırlıkları hesapla (market rejimine göre)
+            dynamic_weights = self._get_dynamic_weights(market_regime)
+
+            # Candle cooldown kontrolü
+            candle_cd_cfg = self.criteria.get("candle_cooldown", {})
+            if candle_cd_cfg.get("enabled", False):
+                count = self._signal_candle_counts.get(symbol, 999)
+                cd_limit = candle_cd_cfg.get("cooldown_candles", 5)
+                if count < cd_limit:
+                    self._signal_candle_counts[symbol] = count + 1
+                    return None
+                # Cooldown geçtiyse sayacı artırmaya devam et
+                self._signal_candle_counts[symbol] = count + 1
+
+            # Zaman filtresi kontrolü
+            time_cfg = self.criteria.get("time_filter", {})
+            is_low_volume_session = False
+            if time_cfg.get("enabled", False):
+                is_low_volume_session = self._check_time_filter(df)
+
+            # BTC filtresi kontrolü
+            btc_cfg = self.criteria.get("btc_filter", {})
+            btc_bearish = False
+            if btc_cfg.get("enabled", False) and btc_df is not None:
+                btc_bearish = self._check_btc_filter(btc_df)
 
             # Her kriteri kontrol et
             criteria_met = []
@@ -116,44 +157,374 @@ class TechnicalAnalyzer:
                 if not cfg.get("enabled", False):
                     continue
 
-                weight = cfg.get("weight", 1)
+                # Dinamik ağırlık: market rejimine göre ayarla
+                base_weight = cfg.get("weight", 1)
+                weight = dynamic_weights.get(name, base_weight)
                 total_weight += weight
+
+                # Volatilite bazlı dinamik hacim eşiği
+                if name == "volume_spike":
+                    cfg = self._apply_adaptive_volume_threshold(cfg, indicators)
+
                 result = check_fn(df, indicators, cfg)
 
                 if result["met"]:
                     criteria_met.append(name)
                     earned_weight += weight
                 criteria_details[name] = result
+                criteria_details[name]["weight"] = weight
+
+            # Multi-Timeframe doğrulama
+            mtf_cfg = self.criteria.get("multi_timeframe", {})
+            if mtf_cfg.get("enabled", False):
+                mtf_weight = mtf_cfg.get("weight", 2)
+                total_weight += mtf_weight
+                mtf_result = self._check_multi_timeframe(htf_df, indicators)
+                if mtf_result["met"]:
+                    criteria_met.append("multi_timeframe")
+                    earned_weight += mtf_weight
+                criteria_details["multi_timeframe"] = mtf_result
+                criteria_details["multi_timeframe"]["weight"] = mtf_weight
 
             # Zorunlu kriter kontrolü: OCC (veya required=True olan herhangi bir kriter)
             for name, cfg in self.criteria.items():
                 if cfg.get("enabled", False) and cfg.get("required", False):
                     if name not in criteria_met:
                         # Zorunlu kriter sağlanmadıysa sinyal üretme
+                        # Ama confluence window'u güncelle
+                        self._update_confluence_state(symbol, name, criteria_met)
                         return None
+
+            # Confluence Window kontrolü
+            conf_cfg = self.criteria.get("confluence_window", {})
+            if conf_cfg.get("enabled", False):
+                if not self._check_confluence_window(symbol, criteria_met, conf_cfg):
+                    return None
 
             # Ağırlıklı güç yüzdesi
             strength_pct = earned_weight / total_weight if total_weight > 0 else 0.0
 
+            # Düşük hacimli saatlerde eşiği yükselt
+            effective_threshold = MIN_SIGNAL_STRENGTH_PCT
+            if is_low_volume_session and time_cfg.get("low_volume_penalty", False):
+                effective_threshold = min(0.95, MIN_SIGNAL_STRENGTH_PCT + 0.05)
+                logger.debug(f"{symbol}: Düşük hacim saati, eşik %{effective_threshold*100:.0f}'e yükseltildi")
+
+            # BTC düşüş filtresi: altcoinlerde eşiği yükselt
+            if btc_bearish and not symbol.startswith("BTC"):
+                effective_threshold = min(0.95, effective_threshold + 0.05)
+                logger.debug(f"{symbol}: BTC düşüşte, altcoin eşiği %{effective_threshold*100:.0f}'e yükseltildi")
+
+            # Çıkış stratejisi puanlaması
+            exit_score, exit_details = self._calculate_exit_score(df, indicators)
+
             # Minimum kriter sayısı ve güç eşiği kontrolü
             if len(criteria_met) >= self.min_criteria and total_weight > 0:
-                return Signal(
-                    symbol=symbol,
-                    signal_type="buy",
-                    strength=earned_weight,
-                    total_criteria=total_weight,
-                    price=float(df["close"].iloc[-1]),
-                    criteria_met=criteria_met,
-                    criteria_details=criteria_details,
-                    indicators=indicators,
-                    strength_pct=strength_pct,
-                )
+                if strength_pct >= effective_threshold:
+                    # Sinyal oluştu - cooldown sayacını sıfırla
+                    self._signal_candle_counts[symbol] = 0
+
+                    return Signal(
+                        symbol=symbol,
+                        signal_type="buy",
+                        strength=earned_weight,
+                        total_criteria=total_weight,
+                        price=float(df["close"].iloc[-1]),
+                        criteria_met=criteria_met,
+                        criteria_details=criteria_details,
+                        indicators=indicators,
+                        strength_pct=strength_pct,
+                        market_regime=market_regime,
+                        exit_score=exit_score,
+                        exit_details=exit_details,
+                    )
 
             return None
 
         except Exception as e:
             logger.error(f"{symbol} analiz hatası: {e}", exc_info=True)
             return None
+
+    def check_exit_signal(self, symbol: str, df: pd.DataFrame) -> Optional[Signal]:
+        """
+        Mevcut pozisyon için çıkış sinyali kontrolü.
+        Giriş gibi puanlama sistemiyle kademeli çıkış değerlendirmesi yapar.
+        """
+        exit_cfg = self.criteria.get("exit_strategy", {})
+        if not exit_cfg.get("enabled", False):
+            return None
+
+        if df is None or len(df) < 50:
+            return None
+
+        try:
+            indicators = self._calculate_indicators(df)
+            exit_score, exit_details = self._calculate_exit_score(df, indicators)
+            min_exit = exit_cfg.get("min_exit_score", 3)
+
+            if exit_score >= min_exit:
+                return Signal(
+                    symbol=symbol,
+                    signal_type="exit",
+                    strength=exit_score,
+                    total_criteria=5,  # Max çıkış puanı
+                    price=float(df["close"].iloc[-1]),
+                    criteria_met=list(exit_details.keys()),
+                    criteria_details=exit_details,
+                    indicators=indicators,
+                    strength_pct=exit_score / 5.0,
+                    exit_score=exit_score,
+                    exit_details=exit_details,
+                )
+            return None
+
+        except Exception as e:
+            logger.error(f"{symbol} çıkış analiz hatası: {e}", exc_info=True)
+            return None
+
+    # ==================== MARKET REJİMİ ALGILAMA ====================
+
+    def _detect_market_regime(self, indicators: dict) -> str:
+        """ADX bazlı market rejimi algılama."""
+        cfg = self.criteria.get("market_regime", {})
+        if not cfg.get("enabled", False):
+            return "unknown"
+
+        adx_val = indicators.get("adx_last", float("nan"))
+        if math.isnan(adx_val):
+            return "unknown"
+
+        trend_th = cfg.get("trend_threshold", 25)
+        range_th = cfg.get("range_threshold", 20)
+
+        if adx_val >= trend_th:
+            return "trending"
+        elif adx_val <= range_th:
+            return "ranging"
+        else:
+            return "transition"
+
+    def _get_dynamic_weights(self, regime: str) -> dict:
+        """Market rejimine göre dinamik ağırlıklar döndürür."""
+        if regime == "unknown":
+            # Varsayılan ağırlıklar
+            return {name: cfg.get("weight", 1)
+                    for name, cfg in self.criteria.items()
+                    if cfg.get("enabled", False)}
+
+        base = {}
+        for name, cfg in self.criteria.items():
+            if not cfg.get("enabled", False):
+                continue
+            w = cfg.get("weight", 1)
+            base[name] = w
+
+        if regime == "trending":
+            # Trend piyasasında: trend kriterlerine daha fazla ağırlık
+            for name in ["trend_filter", "ema_cross", "macd"]:
+                if name in base:
+                    base[name] = max(base[name], int(base[name] * 1.5))
+            # Bollinger ve StochRSI ağırlığını azalt
+            for name in ["bollinger", "stoch_rsi"]:
+                if name in base:
+                    base[name] = max(1, base[name] - 1)
+
+        elif regime == "ranging":
+            # Yatay piyasada: osilatörlere daha fazla ağırlık
+            for name in ["bollinger", "stoch_rsi", "rsi"]:
+                if name in base:
+                    base[name] = base[name] + 1
+            # Trend kriterlerinin ağırlığını azalt
+            for name in ["trend_filter", "ema_cross"]:
+                if name in base:
+                    base[name] = max(1, base[name] - 1)
+
+        return base
+
+    # ==================== VOLATİLİTE BAZLI DİNAMİK EŞİK ====================
+
+    def _apply_adaptive_volume_threshold(self, cfg: dict, indicators: dict) -> dict:
+        """ATR'ye göre hacim eşiğini dinamik ayarla."""
+        atr_val = indicators.get("atr_last", float("nan"))
+        atr_avg = indicators.get("atr_avg", float("nan"))
+
+        if math.isnan(atr_val) or math.isnan(atr_avg) or atr_avg == 0:
+            return cfg
+
+        # ATR ortalamanın üstündeyse → yüksek volatilite → eşiği yükselt
+        # ATR ortalamanın altındaysa → düşük volatilite → eşiği düşür
+        cfg = dict(cfg)  # Kopyala, orijinali değiştirme
+        if atr_val > atr_avg:
+            cfg["multiplier"] = 2.0
+        else:
+            cfg["multiplier"] = 1.3
+
+        return cfg
+
+    # ==================== ZAMAN FİLTRESİ ====================
+
+    def _check_time_filter(self, df: pd.DataFrame) -> bool:
+        """
+        Mevcut saatin düşük hacimli seans olup olmadığını kontrol eder.
+        Returns: True = düşük hacimli saat (sinyal kalitesi düşük)
+        """
+        cfg = self.criteria.get("time_filter", {})
+        if not cfg.get("enabled", False):
+            return False
+
+        # Son mumun saatini al (UTC)
+        try:
+            last_time = df.index[-1]
+            current_hour = last_time.hour
+
+            high_vol_hours = cfg.get("high_volume_hours_utc", [(13, 21)])
+            for start_h, end_h in high_vol_hours:
+                if start_h <= current_hour < end_h:
+                    return False  # Yüksek hacimli saat
+
+            return True  # Düşük hacimli saat
+        except Exception:
+            return False
+
+    # ==================== BTC FİLTRESİ ====================
+
+    def _check_btc_filter(self, btc_df: pd.DataFrame) -> bool:
+        """
+        BTC'nin düşüş trendinde olup olmadığını kontrol eder.
+        Returns: True = BTC düşüşte (altcoin sinyallerini baskıla)
+        """
+        if btc_df is None or len(btc_df) < 50:
+            return False
+
+        try:
+            close = btc_df["close"]
+            # BTC'nin son 20 mumda EMA9 < EMA21 ise düşüş trendi
+            ema9 = close.ewm(span=9, adjust=False).mean()
+            ema21 = close.ewm(span=21, adjust=False).mean()
+
+            ema9_now = float(ema9.iloc[-1])
+            ema21_now = float(ema21.iloc[-1])
+
+            # Ek: Son 5 mumda sürekli düşüş
+            recent_close = close.tail(5)
+            downtrend = all(recent_close.iloc[i] <= recent_close.iloc[i-1]
+                          for i in range(1, len(recent_close)))
+
+            return ema9_now < ema21_now and downtrend
+        except Exception:
+            return False
+
+    # ==================== CONFLUENCE WINDOW ====================
+
+    def _update_confluence_state(self, symbol: str, required_name: str, criteria_met: list):
+        """OCC tetiklenme durumunu günceller (confluence window için)."""
+        if required_name == "occ" and "occ" in criteria_met:
+            self._occ_trigger_candles[symbol] = 0
+        elif symbol in self._occ_trigger_candles:
+            self._occ_trigger_candles[symbol] += 1
+
+    def _check_confluence_window(self, symbol: str, criteria_met: list,
+                                  conf_cfg: dict) -> bool:
+        """
+        OCC tetiklendikten sonra pencere içinde diğer kriterlerin
+        tamamlanıp tamamlanmadığını kontrol eder.
+        """
+        window = conf_cfg.get("window_candles", 3)
+
+        if "occ" in criteria_met:
+            # OCC bu mumda tetiklendi, pencereyi başlat
+            self._occ_trigger_candles[symbol] = 0
+            return True  # İlk mumda tüm kriterler de sağlanıyorsa geçerli
+
+        # OCC daha önce tetiklendi mi?
+        if symbol in self._occ_trigger_candles:
+            candles_since = self._occ_trigger_candles[symbol]
+            if candles_since <= window:
+                # Pencere içindeyiz, OCC olmasa da diğer kriterler yeterliyse geçerli
+                self._occ_trigger_candles[symbol] = candles_since + 1
+                return True
+            else:
+                # Pencere kapandı
+                del self._occ_trigger_candles[symbol]
+
+        return False
+
+    # ==================== ÇIKIŞ STRATEJİSİ PUANLAMASI ====================
+
+    def _calculate_exit_score(self, df: pd.DataFrame, indicators: dict) -> tuple:
+        """
+        Çıkış stratejisi puanlaması.
+        Returns: (score, details_dict)
+        """
+        exit_cfg = self.criteria.get("exit_strategy", {})
+        if not exit_cfg.get("enabled", False):
+            return 0, {}
+
+        score = 0
+        details = {}
+
+        # 1. OCC Ters Kesişim (Close MA < Open MA olarak dönüyor)
+        close_ma = indicators.get("occ_close_ma")
+        open_ma = indicators.get("occ_open_ma")
+        if close_ma is not None and open_ma is not None:
+            c_now = _safe_float(close_ma, -2)
+            o_now = _safe_float(open_ma, -2)
+            c_prev = _safe_float(close_ma, -3)
+            o_prev = _safe_float(open_ma, -3)
+
+            if not any(math.isnan(v) for v in [c_now, o_now, c_prev, o_prev]):
+                # Aşağı kesişim: Close MA, Open MA'nın altına iniyor
+                cross_down = c_now < o_now and c_prev >= o_prev
+                if cross_down:
+                    w = exit_cfg.get("occ_reverse_weight", 2)
+                    score += w
+                    details["occ_reverse"] = {
+                        "met": True,
+                        "detail": f"OCC ters kesişim (CloseMA < OpenMA)",
+                        "weight": w,
+                    }
+
+        # 2. RSI Aşırı Alım
+        rsi_val = _safe_float(indicators.get("rsi", pd.Series()), -1)
+        if not math.isnan(rsi_val):
+            overbought = self.criteria.get("rsi", {}).get("overbought", 70)
+            if rsi_val >= overbought:
+                w = exit_cfg.get("rsi_overbought_weight", 1)
+                score += w
+                details["rsi_overbought"] = {
+                    "met": True,
+                    "detail": f"RSI aşırı alım ({rsi_val:.1f})",
+                    "weight": w,
+                }
+
+        # 3. Hacim Düşüşü (son 3 mumda azalan hacim)
+        vol_ratio = _safe_float(indicators.get("vol_ratio", pd.Series()), -1)
+        if not math.isnan(vol_ratio) and vol_ratio < 0.7:
+            w = exit_cfg.get("volume_drop_weight", 1)
+            score += w
+            details["volume_drop"] = {
+                "met": True,
+                "detail": f"Hacim düşüşü ({vol_ratio:.1f}x)",
+                "weight": w,
+            }
+
+        # 4. Stochastic RSI Aşırı Alım
+        k_val = _safe_float(indicators.get("stoch_rsi_k", pd.Series()), -1)
+        d_val = _safe_float(indicators.get("stoch_rsi_d", pd.Series()), -1)
+        if not math.isnan(k_val) and not math.isnan(d_val):
+            stoch_ob = self.criteria.get("stoch_rsi", {}).get("overbought", 80)
+            cross_down = k_val < d_val
+            in_overbought = k_val >= stoch_ob or d_val >= stoch_ob
+            if cross_down and in_overbought:
+                w = exit_cfg.get("stoch_overbought_weight", 1)
+                score += w
+                details["stoch_overbought"] = {
+                    "met": True,
+                    "detail": f"StochRSI aşırı alımda aşağı kesişim (K={k_val:.1f})",
+                    "weight": w,
+                }
+
+        return score, details
 
     # ==================== İNDİKATÖR HESAPLAMALARI ====================
 
@@ -214,6 +585,22 @@ class TechnicalAnalyzer:
         else:
             ind["change_24h"] = 0.0
 
+        # ADX (Average Directional Index) - Market Rejimi
+        regime_cfg = self.criteria.get("market_regime", {})
+        if regime_cfg.get("enabled", False):
+            adx_period = regime_cfg.get("adx_period", 14)
+            ind["adx"], ind["plus_di"], ind["minus_di"] = self._calculate_adx(
+                high, low, close, adx_period
+            )
+            ind["adx_last"] = _safe_float(ind["adx"], -1)
+        else:
+            ind["adx_last"] = float("nan")
+
+        # ATR (Average True Range) - Volatilite Ölçümü
+        ind["atr"] = self._calculate_atr(high, low, close, period=14)
+        ind["atr_avg"] = float(ind["atr"].rolling(20).mean().iloc[-1]) if len(ind["atr"].dropna()) >= 20 else float("nan")
+        ind["atr_last"] = _safe_float(ind["atr"], -1)
+
         # OCC (Open Close Cross) - Non Repaint
         occ_cfg = self.criteria.get("occ", {})
         if occ_cfg.get("enabled", False):
@@ -236,6 +623,85 @@ class TechnicalAnalyzer:
         ind["last_volume"] = float(volume.iloc[-1])
 
         return ind
+
+    def _calculate_adx(self, high: pd.Series, low: pd.Series,
+                       close: pd.Series, period: int = 14) -> tuple:
+        """ADX, +DI, -DI hesaplar."""
+        # True Range
+        tr1 = high - low
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+        # Directional Movement
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+
+        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+        # Smoothed TR, +DM, -DM (Wilder's smoothing)
+        atr = tr.ewm(alpha=1/period, adjust=False).mean()
+        smooth_plus = plus_dm.ewm(alpha=1/period, adjust=False).mean()
+        smooth_minus = minus_dm.ewm(alpha=1/period, adjust=False).mean()
+
+        # +DI, -DI
+        plus_di = (smooth_plus / atr.replace(0, np.nan)) * 100
+        minus_di = (smooth_minus / atr.replace(0, np.nan)) * 100
+
+        # DX ve ADX
+        dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
+        adx = dx.ewm(alpha=1/period, adjust=False).mean()
+
+        return adx, plus_di, minus_di
+
+    def _calculate_atr(self, high: pd.Series, low: pd.Series,
+                       close: pd.Series, period: int = 14) -> pd.Series:
+        """ATR (Average True Range) hesaplar."""
+        tr1 = high - low
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        return tr.ewm(alpha=1/period, adjust=False).mean()
+
+    # ==================== MULTI-TIMEFRAME DOĞRULAMA ====================
+
+    def _check_multi_timeframe(self, htf_df: pd.DataFrame, indicators: dict) -> dict:
+        """Üst zaman diliminde trend yönü doğrulaması."""
+        if htf_df is None or len(htf_df) < 50:
+            return {
+                "met": False,
+                "detail": "Üst TF verisi yok",
+                "description": "Multi-TF doğrulanamadı",
+            }
+
+        try:
+            htf_close = htf_df["close"]
+            htf_ema9 = htf_close.ewm(span=9, adjust=False).mean()
+            htf_ema21 = htf_close.ewm(span=21, adjust=False).mean()
+            htf_ema200 = htf_close.ewm(span=200, adjust=False).mean()
+
+            ema9_now = float(htf_ema9.iloc[-1])
+            ema21_now = float(htf_ema21.iloc[-1])
+            ema200_now = float(htf_ema200.iloc[-1])
+            htf_price = float(htf_close.iloc[-1])
+
+            # Üst TF'de trend yukarı mı?
+            uptrend = (ema9_now > ema21_now and htf_price > ema200_now)
+
+            higher_tf = self.criteria.get("multi_timeframe", {}).get("higher_tf", "4h")
+
+            return {
+                "met": uptrend,
+                "detail": f"{higher_tf} EMA9={ema9_now:.2f}, EMA21={ema21_now:.2f}, Fiyat {'>' if htf_price > ema200_now else '<'} EMA200",
+                "description": f"{higher_tf} trend {'yükseliş' if uptrend else 'düşüş'}",
+            }
+        except Exception as e:
+            return {
+                "met": False,
+                "detail": f"MTF hesaplama hatası: {e}",
+                "description": "Multi-TF doğrulanamadı",
+            }
 
     # ==================== KRİTER KONTROL FONKSİYONLARI ====================
 
@@ -309,7 +775,9 @@ class TechnicalAnalyzer:
             zone = "Aşırı alım"
 
         desc = f"RSI {zone}"
-        if in_buy_zone:
+        if oversold_bounce:
+            desc = "RSI aşırı satımdan çıkış (güçlü sinyal)"
+        elif in_buy_zone:
             desc = f"RSI Alım bölgesi (yükseliyor)"
 
         return {
@@ -349,32 +817,46 @@ class TechnicalAnalyzer:
         close = float(df["close"].iloc[-1])
         bb_lower = _safe_float(ind["bb_lower"], -1)
         bb_upper = _safe_float(ind["bb_upper"], -1)
+        bb_middle = _safe_float(ind["bb_middle"], -1)
         bb_pct = _safe_float(ind["bb_pct"], -1)
 
         if math.isnan(bb_lower) or math.isnan(bb_upper) or math.isnan(bb_pct):
             return {"met": False, "detail": "Bollinger verisi yetersiz", "description": "Hesaplanamadı"}
 
         # Alt banda dokunma veya altına inme
-        met = close <= bb_lower * 1.005  # %0.5 tolerans
+        touch_lower = close <= bb_lower * 1.005  # %0.5 tolerans
+        # Orta bandın (20 SMA) üstüne çıkış — Trend filtresiyle uyum
+        prev_close = float(df["close"].iloc[-2]) if len(df) > 1 else close
+        cross_middle_up = prev_close <= bb_middle and close > bb_middle
+
+        met = touch_lower or cross_middle_up
+
+        if touch_lower:
+            desc = "Alt banda temas"
+        elif cross_middle_up:
+            desc = "Orta band üstüne çıkış (trend doğrulama)"
+        else:
+            desc = "Band içinde"
 
         return {
             "met": met,
-            "detail": f"BB%={bb_pct:.2f}, Alt={bb_lower:.4f}, Üst={bb_upper:.4f}",
-            "description": "Alt banda temas" if met else "Band içinde",
+            "detail": f"BB%={bb_pct:.2f}, Alt={bb_lower:.4f}, Orta={bb_middle:.4f}, Üst={bb_upper:.4f}",
+            "description": desc,
         }
 
     def _check_volume_spike(self, df, ind, cfg) -> dict:
-        """Hacim artışı kontrolü."""
+        """Hacim artışı kontrolü (ATR-adaptif eşik)."""
         vol_ratio = _safe_float(ind["vol_ratio"], -1)
 
         if math.isnan(vol_ratio):
             return {"met": False, "detail": "Hacim verisi yetersiz", "description": "Hesaplanamadı"}
 
-        met = vol_ratio >= cfg["multiplier"]
+        multiplier = cfg["multiplier"]
+        met = vol_ratio >= multiplier
 
         return {
             "met": met,
-            "detail": f"Hacim oranı={vol_ratio:.1f}x (eşik: {cfg['multiplier']}x)",
+            "detail": f"Hacim oranı={vol_ratio:.1f}x (eşik: {multiplier}x)",
             "description": f"Hacim patlaması ({vol_ratio:.1f}x)" if met else "Normal hacim",
         }
 
