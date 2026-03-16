@@ -80,9 +80,10 @@ class Signal:
 class TechnicalAnalyzer:
     """Teknik analiz ve sinyal üretici."""
 
-    def __init__(self, criteria: dict = None):
+    def __init__(self, criteria: dict = None, min_strength_pct: float = None):
         self.criteria = criteria or CRITERIA
         self.min_criteria = MIN_CRITERIA_MET
+        self.min_strength_pct = min_strength_pct if min_strength_pct is not None else MIN_SIGNAL_STRENGTH_PCT
         # Confluence window: sembol bazında OCC tetiklenme zamanı
         self._occ_trigger_candles = {}  # {symbol: candle_count_since_occ}
         # Candle cooldown: sembol bazında son sinyal sonrası mum sayısı
@@ -205,7 +206,7 @@ class TechnicalAnalyzer:
             strength_pct = earned_weight / total_weight if total_weight > 0 else 0.0
 
             # Düşük hacimli saatlerde eşiği yükselt
-            effective_threshold = MIN_SIGNAL_STRENGTH_PCT
+            effective_threshold = self.min_strength_pct
             if is_low_volume_session and time_cfg.get("low_volume_penalty", False):
                 effective_threshold = min(0.95, MIN_SIGNAL_STRENGTH_PCT + 0.05)
                 logger.debug(f"{symbol}: Düşük hacim saati, eşik %{effective_threshold*100:.0f}'e yükseltildi")

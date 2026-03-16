@@ -270,7 +270,7 @@ class BacktestEngine:
         min_warmup = 200  # İndikatörlerin ısınması için ilk N bar atla
 
         # Her bar analiz et
-        analyzer = TechnicalAnalyzer(criteria=self.criteria)
+        analyzer = TechnicalAnalyzer(criteria=self.criteria, min_strength_pct=self.min_strength_pct)
 
         for bar_idx in range(min_warmup, len(df)):
             # Sadece o ana kadar olan veriyi ver (look-ahead bias önleme)
