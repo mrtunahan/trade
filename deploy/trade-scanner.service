@@ -1,0 +1,26 @@
+[Unit]
+Description=BinanceTR Trade Scanner Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+Group=trader
+WorkingDirectory=/home/trader/trade
+ExecStart=/home/trader/trade/venv/bin/python scanner.py
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+# Ortam değişkenleri .env dosyasından okunur (python-dotenv ile)
+# Ek güvenlik için:
+EnvironmentFile=/home/trader/trade/.env
+
+# Kaynak limitleri
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

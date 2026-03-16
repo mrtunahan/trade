@@ -28,6 +28,38 @@ def _safe_float(series, index=-1, default=float("nan")) -> float:
         return default
 
 
+def _calc_ma(series: pd.Series, period: int, ma_type: str = "EMA") -> pd.Series:
+    """Farklı hareketli ortalama tiplerini hesaplar."""
+    ma_type = ma_type.upper()
+    if ma_type == "SMA":
+        return series.rolling(period).mean()
+    elif ma_type == "EMA":
+        return series.ewm(span=period, adjust=False).mean()
+    elif ma_type == "DEMA":
+        ema1 = series.ewm(span=period, adjust=False).mean()
+        ema2 = ema1.ewm(span=period, adjust=False).mean()
+        return 2 * ema1 - ema2
+    elif ma_type == "TEMA":
+        ema1 = series.ewm(span=period, adjust=False).mean()
+        ema2 = ema1.ewm(span=period, adjust=False).mean()
+        ema3 = ema2.ewm(span=period, adjust=False).mean()
+        return 3 * ema1 - 3 * ema2 + ema3
+    elif ma_type == "WMA":
+        weights = np.arange(1, period + 1, dtype=float)
+        return series.rolling(period).apply(
+            lambda x: np.dot(x, weights) / weights.sum(), raw=True
+        )
+    elif ma_type == "HMA":
+        # Hull Moving Average = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        half_p = max(period // 2, 1)
+        sqrt_p = max(int(np.sqrt(period)), 1)
+        wma_half = _calc_ma(series, half_p, "WMA")
+        wma_full = _calc_ma(series, period, "WMA")
+        return _calc_ma(2 * wma_half - wma_full, sqrt_p, "WMA")
+    else:
+        return series.ewm(span=period, adjust=False).mean()
+
+
 @dataclass
 class Signal:
     """Bir sinyal sonucu."""
@@ -74,6 +106,7 @@ class TechnicalAnalyzer:
                 "trend_filter":       self._check_trend_filter,
                 "support_resistance": self._check_support_resistance,
                 "stoch_rsi":          self._check_stoch_rsi,
+                "occ":                self._check_occ,
             }
 
             for name, check_fn in checks.items():
@@ -165,6 +198,23 @@ class TechnicalAnalyzer:
             ind["change_24h"] = ((close.iloc[-1] - close.iloc[-24]) / close.iloc[-24]) * 100
         else:
             ind["change_24h"] = 0.0
+
+        # OCC (Open Close Cross) - Non Repaint
+        occ_cfg = self.criteria.get("occ", {})
+        if occ_cfg.get("enabled", False):
+            occ_period = occ_cfg.get("period", 5)
+            occ_ma_type = occ_cfg.get("ma_type", "EMA")
+
+            # Close MA ve Open MA hesapla
+            ind["occ_close_ma"] = _calc_ma(close, occ_period, occ_ma_type)
+            ind["occ_open_ma"] = _calc_ma(df["open"], occ_period, occ_ma_type)
+
+            # Difference Factor (Close MA - Open MA)
+            ind["occ_diff"] = ind["occ_close_ma"] - ind["occ_open_ma"]
+
+            # Cross Strength: farkın yüzdesel büyüklüğü
+            mid = (ind["occ_close_ma"] + ind["occ_open_ma"]) / 2
+            ind["occ_strength"] = (ind["occ_diff"] / mid.replace(0, np.nan)) * 100
 
         # Son değerleri de kaydet
         ind["last_close"] = float(close.iloc[-1])
@@ -360,4 +410,64 @@ class TechnicalAnalyzer:
             "met": met,
             "detail": f"StochRSI K={k_val:.1f}, D={d_val:.1f}",
             "description": "Aşırı satımda yukarı kesişim" if met else "Sinyal yok",
+        }
+
+    def _check_occ(self, df, ind, cfg) -> dict:
+        """
+        OCC (Open Close Cross) Non-Repaint kontrolü.
+        Close MA ve Open MA kesişimine dayalı sinyal üretir.
+        Non-repaint: Sadece kapanmış (onaylanmış) mumlara bakılır.
+        """
+        close_ma = ind.get("occ_close_ma")
+        open_ma = ind.get("occ_open_ma")
+        occ_strength = ind.get("occ_strength")
+
+        if close_ma is None or open_ma is None:
+            return {"met": False, "detail": "OCC verisi yok", "description": "Hesaplanamadı"}
+
+        # Non-Repaint: Son kapanmış mumu kullan (iloc[-2]), mevcut mumu değil
+        # iloc[-1] henüz kapanmamış olabilir, bu yüzden [-2] kullanıyoruz
+        c_now = _safe_float(close_ma, -2)
+        o_now = _safe_float(open_ma, -2)
+        c_prev = _safe_float(close_ma, -3)
+        o_prev = _safe_float(open_ma, -3)
+
+        if math.isnan(c_now) or math.isnan(o_now) or math.isnan(c_prev) or math.isnan(o_prev):
+            return {"met": False, "detail": "OCC verisi yetersiz", "description": "Hesaplanamadı"}
+
+        # Yukarı kesişim: Close MA, Open MA'yı yukarı kesiyor (Long sinyali)
+        cross_up = c_now > o_now and c_prev <= o_prev
+
+        # Yakın zamanda kesişim (son 3 kapanmış mum)
+        recent_cross = False
+        if not cross_up:
+            for i in range(-4, -1):
+                c_i = _safe_float(close_ma, i)
+                o_i = _safe_float(open_ma, i)
+                c_i_prev = _safe_float(close_ma, i - 1)
+                o_i_prev = _safe_float(open_ma, i - 1)
+                if math.isnan(c_i) or math.isnan(o_i) or math.isnan(c_i_prev) or math.isnan(o_i_prev):
+                    continue
+                if c_i > o_i and c_i_prev <= o_i_prev:
+                    recent_cross = True
+                    break
+
+        met = cross_up or recent_cross
+
+        # Opsiyonel: Minimum cross strength filtresi
+        min_strength = cfg.get("min_strength", 0.0)
+        strength_val = _safe_float(occ_strength, -2, default=0.0) if occ_strength is not None else 0.0
+        if met and abs(strength_val) < min_strength:
+            met = False
+
+        # Mevcut durum bilgisi
+        if c_now > o_now:
+            trend = "Yükseliş (Close MA > Open MA)"
+        else:
+            trend = "Düşüş (Close MA < Open MA)"
+
+        return {
+            "met": met,
+            "detail": f"CloseMA={c_now:.4f}, OpenMA={o_now:.4f}, Güç={strength_val:+.3f}%",
+            "description": f"OCC Long kesişim — {trend}" if met else f"OCC Kesişim yok — {trend}",
         }

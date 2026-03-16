@@ -113,6 +113,17 @@ CRITERIA = {
         "oversold": 20,
         "overbought": 80,
     },
+
+    # --- OCC (Open Close Cross) Non-Repaint ---
+    # Close MA ve Open MA kesişimine dayalı sinyal.
+    # JustUncleL'ın OCC Alert R6.2 indikatöründen esinlenilmiştir.
+    # Non-repaint: Sadece kapanmış mumlara bakılır.
+    "occ": {
+        "enabled": True,
+        "period": 5,              # MA periyodu
+        "ma_type": "EMA",         # "SMA", "EMA", "DEMA", "TEMA", "WMA", "HMA"
+        "min_strength": 0.01,     # Minimum cross strength % (zayıf sinyalleri filtrele)
+    },
 }
 
 # Kaç kriter aynı anda sağlanmalı (minimum)
