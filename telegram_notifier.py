@@ -1,8 +1,8 @@
 # ============================================================================
-# telegram_notifier.py - Telegram Bildirim Modülü
+# telegram_notifier.py - Telegram Bildirim Modülü (Geliştirilmiş v2)
 # ============================================================================
 # Bulunan sinyalleri Telegram'a zengin formatlı mesajlarla gönderir.
-# Mini grafik görseli opsiyonel olarak eklenebilir.
+# v2: Market rejimi, çıkış sinyali, gelişmiş modül bilgileri
 # ============================================================================
 
 import io
@@ -105,20 +105,40 @@ class TelegramNotifier:
         change_24h = signal.indicators.get("change_24h", 0)
         change_emoji = "📈" if change_24h >= 0 else "📉"
 
+        # Market rejimi bilgisi
+        regime_map = {
+            "trending": "📊 Trend",
+            "ranging": "📐 Yatay",
+            "transition": "🔄 Geçiş",
+            "unknown": "❓ Belirsiz",
+        }
+        regime_text = regime_map.get(signal.market_regime, "")
+
+        # ADX bilgisi
+        adx_val = signal.indicators.get("adx_last", float("nan"))
+        adx_str = f" (ADX: {adx_val:.1f})" if adx_val == adx_val else ""  # NaN check
+
         # Sağlanan kriterler listesi
         criteria_lines = []
         for name in signal.criteria_met:
             detail = signal.criteria_details.get(name, {})
             desc = detail.get("description", name)
-            criteria_lines.append(f"  ✅ <b>{self._format_criteria_name(name)}</b>: {desc}")
+            weight = detail.get("weight", "?")
+            criteria_lines.append(f"  ✅ <b>{self._format_criteria_name(name)}</b>: {desc} [{weight}p]")
 
         # Sağlanmayan kriterleri de göster (kapalı olanları atlayarak)
         for name, detail in signal.criteria_details.items():
             if name not in signal.criteria_met:
                 desc = detail.get("description", name)
-                criteria_lines.append(f"  ❌ {self._format_criteria_name(name)}: {desc}")
+                weight = detail.get("weight", "?")
+                criteria_lines.append(f"  ❌ {self._format_criteria_name(name)}: {desc} [{weight}p]")
 
         criteria_text = "\n".join(criteria_lines)
+
+        # Çıkış bilgisi
+        exit_info = ""
+        if signal.exit_score > 0:
+            exit_info = f"\n⚠️ <b>Çıkış Puanı:</b> {signal.exit_score}/5\n"
 
         # Ana mesaj
         message = (
@@ -129,9 +149,16 @@ class TelegramNotifier:
             f"📊 <b>Güç:</b> {strength_text} ({signal.strength}/{signal.total_criteria} puan — %{strength_pct*100:.0f})\n"
             f"📉 <b>RSI:</b> {rsi_str}\n"
             f"{change_emoji} <b>24s Değişim:</b> {change_24h:+.2f}%\n"
+        )
+
+        if regime_text:
+            message += f"🏷 <b>Piyasa:</b> {regime_text}{adx_str}\n"
+
+        message += (
             f"\n"
             f"<b>Kriterler:</b>\n"
             f"{criteria_text}\n"
+            f"{exit_info}"
             f"\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -143,6 +170,38 @@ class TelegramNotifier:
             return self.send_photo(chart_bytes, caption=message)
         else:
             return self.send_message(message)
+
+    # ==================== ÇIKIŞ SİNYALİ ====================
+
+    def send_exit_signal(self, signal) -> bool:
+        """Çıkış sinyali bildirimini gönderir."""
+        quote = "TRY" if signal.symbol.endswith("TRY") else "USDT"
+        base = signal.symbol.replace("TRY", "").replace("USDT", "")
+
+        exit_lines = []
+        for name, detail in signal.exit_details.items():
+            if detail.get("met", False):
+                w = detail.get("weight", 1)
+                exit_lines.append(f"  ⚠️ {detail.get('detail', name)} [{w}p]")
+
+        exit_text = "\n".join(exit_lines)
+
+        message = (
+            f"🚪 <b>ÇIKIŞ SİNYALİ - {base}/{quote}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"\n"
+            f"💰 <b>Fiyat:</b> {signal.price:,.4f} {quote}\n"
+            f"📊 <b>Çıkış Puanı:</b> {signal.exit_score}/5\n"
+            f"\n"
+            f"<b>Çıkış Nedenleri:</b>\n"
+            f"{exit_text}\n"
+            f"\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"🔗 <a href='https://www.tradingview.com/chart/?symbol=BINANCE:{signal.symbol}'>TradingView</a>"
+        )
+
+        return self.send_message(message)
 
     # ==================== GÜNLÜK ÖZET ====================
 
@@ -166,9 +225,10 @@ class TelegramNotifier:
             for s in signals_today:
                 quote = "TRY" if s.symbol.endswith("TRY") else "USDT"
                 base = s.symbol.replace("TRY", "").replace("USDT", "")
+                regime = f" [{s.market_regime}]" if s.market_regime != "unknown" else ""
                 signal_lines.append(
                     f"  • <b>{base}/{quote}</b> — {s.price:,.4f} {quote} "
-                    f"(güç: {s.strength}/{s.total_criteria})"
+                    f"(güç: {s.strength}/{s.total_criteria}){regime}"
                 )
 
             signals_text = "\n".join(signal_lines)
@@ -180,7 +240,7 @@ class TelegramNotifier:
             for i, s in enumerate(top3):
                 medal = ["🥇", "🥈", "🥉"][i]
                 base = s.symbol.replace("TRY", "").replace("USDT", "")
-                top_lines.append(f"  {medal} {base} ({s.strength}/{s.total_criteria} kriter)")
+                top_lines.append(f"  {medal} {base} ({s.strength}/{s.total_criteria} puan)")
 
             message = (
                 f"📋 <b>GÜNLÜK ÖZET - {now.strftime('%Y-%m-%d')}</b>\n"
@@ -201,14 +261,19 @@ class TelegramNotifier:
 
     # ==================== DURUM BİLDİRİMLERİ ====================
 
-    def send_startup(self, pair_count: int) -> bool:
+    def send_startup(self, pair_count: int, active_modules: list = None) -> bool:
         """Bot başlatıldığında bildirim gönderir."""
+        modules_text = ""
+        if active_modules:
+            modules_text = f"🧩 Gelişmiş modüller: {', '.join(active_modules)}\n"
+
         message = (
-            f"🤖 <b>Scanner Bot Aktif!</b>\n"
+            f"🤖 <b>Scanner Bot v2.0 Aktif!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"\n"
             f"📊 Takip edilen parite: {pair_count}\n"
             f"🎯 Min sinyal gücü: %{MIN_SIGNAL_STRENGTH_PCT*100:.0f}\n"
+            f"{modules_text}"
             f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"\n"
             f"Sadece güçlü sinyaller bildirilecek..."
@@ -238,6 +303,8 @@ class TelegramNotifier:
             "support_resistance": "Destek/Direnç",
             "stoch_rsi": "Stochastic RSI",
             "occ": "OCC",
+            "multi_timeframe": "Multi-TF",
+            "market_regime": "Piyasa Rejimi",
         }
         return names.get(name, name)
 
