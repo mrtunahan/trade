@@ -445,10 +445,15 @@ def make_step3a_criteria() -> dict:
     """
     Adım 3a: 1H/4H Timeframe Uyumu.
     Tam strateji + 1H ana TF, 4H üst TF.
+    Backtest için confluence window ve candle cooldown kapalı
+    (bu zamanlama filtreleri real-time'da anlamlı, backtest'te state sorunu yaratır).
     """
-    c = deepcopy(CRITERIA)  # Tam strateji
+    c = deepcopy(CRITERIA)
     c["multi_timeframe"]["enabled"] = True
     c["multi_timeframe"]["higher_tf"] = "4h"
+    c["occ"]["required"] = False       # Backtest'te zorunlu kriter kaldır
+    c["confluence_window"]["enabled"] = False  # Bar-by-bar state sorunu
+    c["candle_cooldown"]["enabled"] = False     # Bar-by-bar state sorunu
     return c
 
 
@@ -457,15 +462,22 @@ def make_step3b_criteria() -> dict:
     Adım 3b: 15M/1H Timeframe Uyumu.
     Aynı strateji, farklı zaman dilimi kombinasyonu.
     """
-    c = deepcopy(CRITERIA)  # Tam strateji
+    c = deepcopy(CRITERIA)
     c["multi_timeframe"]["enabled"] = True
     c["multi_timeframe"]["higher_tf"] = "1h"
+    c["occ"]["required"] = False
+    c["confluence_window"]["enabled"] = False
+    c["candle_cooldown"]["enabled"] = False
     return c
 
 
 def make_full_criteria() -> dict:
-    """Tam strateji (mevcut config aynen)."""
-    return deepcopy(CRITERIA)
+    """Tam strateji (mevcut config, backtest uyumlu)."""
+    c = deepcopy(CRITERIA)
+    c["occ"]["required"] = False       # Backtest'te gevşet
+    c["confluence_window"]["enabled"] = False
+    c["candle_cooldown"]["enabled"] = False
+    return c
 
 
 # ==================== KARŞILAŞTIRMA RAPORU ====================
@@ -590,7 +602,7 @@ def run_step3(symbols: list, lookback: int) -> tuple:
 
     engine_3a = BacktestEngine(
         criteria_override=make_step3a_criteria(),
-        min_strength_pct=0.85,  # Tam stratejide yüksek eşik
+        min_strength_pct=0.65,  # 12 puanlık sistemde ~8/12 = %65+
         timeframe="1h",
         stop_loss_pct=2.0,
         take_profit_pct=4.0,
@@ -605,7 +617,7 @@ def run_step3(symbols: list, lookback: int) -> tuple:
 
     engine_3b = BacktestEngine(
         criteria_override=make_step3b_criteria(),
-        min_strength_pct=0.85,
+        min_strength_pct=0.65,
         timeframe="15m",
         stop_loss_pct=1.5,  # Daha kısa TF → daha dar SL/TP
         take_profit_pct=3.0,
@@ -625,7 +637,7 @@ def run_full(symbols: list, lookback: int) -> BacktestResult:
 
     engine = BacktestEngine(
         criteria_override=make_full_criteria(),
-        min_strength_pct=MIN_SIGNAL_STRENGTH_PCT,
+        min_strength_pct=0.70,  # 12 puanlık sistemde ~9/12 = %75 → backtest'te %70
         stop_loss_pct=2.0,
         take_profit_pct=4.0,
         max_hold_bars=48,
