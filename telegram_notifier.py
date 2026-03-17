@@ -1,8 +1,8 @@
 # ============================================================================
-# telegram_notifier.py - Telegram Bildirim Modülü (Manuel Trade v3)
+# telegram_notifier.py - Hiyerarşik OCC Telegram Bildirimi
 # ============================================================================
-# OCC-merkezli swing trade sinyallerini Telegram'a gönderir.
-# Manuel trading için net giriş/SL/TP seviyeleri, TRY pariteleri.
+# Multi-TF OCC durumunu TF heatmap ile gösterir.
+# Her renk değişiminde ve alım sinyalinde bildirim gönderir.
 # ============================================================================
 
 import io
@@ -16,7 +16,8 @@ from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     SEND_CHART_IMAGE,
-    MIN_SIGNAL_STRENGTH_PCT,
+    OCC_MIN_SCORE,
+    OCC_TIMEFRAMES,
 )
 
 logger = logging.getLogger("Telegram")
@@ -31,10 +32,9 @@ class TelegramNotifier:
         self.api_url = f"https://api.telegram.org/bot{self.token}"
         self.session = requests.Session()
 
-    # ==================== MESAJ GÖNDER ====================
+    # ==================== TEMEL MESAJ ====================
 
     def send_message(self, text: str, parse_mode: str = "HTML", disable_preview: bool = True) -> bool:
-        """Basit metin mesajı gönderir."""
         try:
             resp = self.session.post(
                 f"{self.api_url}/sendMessage",
@@ -55,7 +55,6 @@ class TelegramNotifier:
             return False
 
     def send_photo(self, photo_bytes: bytes, caption: str = "", parse_mode: str = "HTML") -> bool:
-        """Fotoğraf gönderir (mini grafik için)."""
         try:
             resp = self.session.post(
                 f"{self.api_url}/sendPhoto",
@@ -75,104 +74,121 @@ class TelegramNotifier:
             logger.error(f"Telegram fotoğraf bağlantı hatası: {e}")
             return False
 
-    # ==================== SİNYAL BİLDİRİMİ ====================
+    # ==================== TF RENK DEĞİŞİMİ ====================
 
-    def send_signal(self, signal, chart_bytes: Optional[bytes] = None) -> bool:
-        """
-        Manuel trade sinyalini Telegram'a gönderir.
-        Net giriş fiyatı, SL/TP seviyeleri ve pozisyon bilgisi.
-        """
-        strength_pct = signal.strength_pct
-        if strength_pct >= 0.85:
-            strength_emoji = "🔥🔥🔥"
-            strength_text = "Full Sniper"
-        elif strength_pct >= 0.70:
-            strength_emoji = "🔥🔥"
-            strength_text = "Strong"
+    def send_tf_change(self, symbol: str, tf_status, price: float) -> bool:
+        """Tek bir timeframe'deki OCC renk değişimini bildirir."""
+        quote = "TRY" if symbol.endswith("TRY") else "USDT"
+        base = symbol.replace("TRY", "").replace("USDT", "")
+
+        if tf_status.is_green:
+            emoji = "🟢"
+            direction = "YEŞİL (Yükseliş)"
+            action = "Close MA > Open MA"
         else:
-            strength_emoji = "🔥"
-            strength_text = "Normal"
+            emoji = "🔴"
+            direction = "KIRMIZI (Düşüş)"
+            action = "Close MA < Open MA"
 
+        message = (
+            f"{emoji} <b>OCC Renk Değişimi</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"\n"
+            f"<b>{base}/{quote}</b> — {tf_status.label} ({tf_status.timeframe})\n"
+            f"Yön: <b>{direction}</b>\n"
+            f"Güç: {tf_status.strength:+.3f}%\n"
+            f"Fiyat: {price:,.4f} {quote}\n"
+            f"\n"
+            f"🕐 {datetime.now().strftime('%H:%M:%S')}\n"
+            f"🔗 <a href='https://www.tradingview.com/chart/?symbol=BINANCE:{symbol}'>TradingView</a>"
+        )
+
+        return self.send_message(message)
+
+    # ==================== ALIM SİNYALİ (Multi-TF) ====================
+
+    def send_multi_tf_signal(self, signal, chart_bytes: Optional[bytes] = None) -> bool:
+        """
+        Hiyerarşik multi-TF OCC alım sinyalini gönderir.
+        TF heatmap + RSI/ADX bilgisi + SL/TP seviyeleri.
+        """
         quote = "TRY" if signal.symbol.endswith("TRY") else "USDT"
         base = signal.symbol.replace("TRY", "").replace("USDT", "")
 
-        rsi_val = signal.indicators.get("rsi")
-        rsi_str = f"{float(rsi_val.iloc[-1]):.1f}" if rsi_val is not None and len(rsi_val) > 0 else "N/A"
+        # TF Heatmap
+        heatmap_lines = []
+        for ts in signal.tf_statuses:
+            icon = "🟢" if ts.is_green else "🔴"
+            cross_mark = " ←" if ts.just_crossed else ""
+            pts = f"[{ts.weight}p]" if ts.weight > 0 else "[tetik]"
+            heatmap_lines.append(
+                f"  {icon} <b>{ts.label}</b> ({ts.timeframe}) "
+                f"{pts}{cross_mark}"
+            )
+        heatmap_text = "\n".join(heatmap_lines)
 
-        change_24h = signal.indicators.get("change_24h", 0)
-        change_emoji = "📈" if change_24h >= 0 else "📉"
+        # Puan seviyesi
+        score = signal.total_score
+        max_score = signal.max_score
+        if score >= 7:
+            score_emoji = "🔥🔥🔥"
+            score_label = "Full Sniper"
+        elif score >= 5:
+            score_emoji = "🔥🔥"
+            score_label = "Strong"
+        else:
+            score_emoji = "🔥"
+            score_label = "Normal"
 
-        regime_map = {
-            "trending": "Trend",
-            "ranging": "Yatay",
-            "transition": "Geçiş",
-            "unknown": "Belirsiz",
-        }
-        regime_text = regime_map.get(signal.market_regime, "")
+        # RSI bilgisi
+        rsi_val = signal.rsi_value
+        if signal.rsi_quality == "ideal":
+            rsi_text = f"RSI {rsi_val:.1f} — Ideal giriş bölgesi"
+            rsi_emoji = "✅"
+        elif signal.rsi_quality == "caution":
+            rsi_text = f"RSI {rsi_val:.1f} — DİKKAT: Hareket zaten olmuş olabilir"
+            rsi_emoji = "⚠️"
+        elif signal.rsi_quality == "blocked":
+            rsi_text = f"RSI {rsi_val:.1f} — Aşırı alım bölgesi"
+            rsi_emoji = "🚫"
+        else:
+            rsi_text = f"RSI {rsi_val:.1f}" if rsi_val == rsi_val else "RSI N/A"
+            rsi_emoji = "📊"
 
-        adx_val = signal.indicators.get("adx_last", float("nan"))
-        adx_str = f" (ADX: {adx_val:.1f})" if adx_val == adx_val else ""
+        # ADX bilgisi
+        adx_val = signal.adx_value
+        if signal.adx_regime == "trending":
+            adx_text = f"ADX {adx_val:.1f} — Güçlü trend"
+            adx_emoji = "📈"
+        elif signal.adx_regime == "weak":
+            adx_text = f"ADX {adx_val:.1f} — Zayıf/yatay piyasa"
+            adx_emoji = "📉"
+        else:
+            adx_text = f"ADX {adx_val:.1f}" if adx_val == adx_val else "ADX N/A"
+            adx_emoji = "📊"
 
-        # Fiyat ve seviyeler
+        # SL/TP seviyeleri
         price = signal.price
-        sl_pct = getattr(signal, "stop_loss_pct", 3.0)
-        tp_pct = getattr(signal, "take_profit_pct", 6.0)
+        sl_pct = signal.stop_loss_pct
+        tp_pct = signal.take_profit_pct
         sl_price = price * (1 - sl_pct / 100)
         tp_price = price * (1 + tp_pct / 100)
-        pos_size = getattr(signal, "position_size_pct", 1.0)
-        pos_tier = getattr(signal, "position_tier", "")
 
-        # Sağlanan kriterler
-        criteria_lines = []
-        for name in signal.criteria_met:
-            detail = signal.criteria_details.get(name, {})
-            desc = detail.get("description", name)
-            weight = detail.get("weight", "?")
-            criteria_lines.append(f"  ✅ <b>{self._format_criteria_name(name)}</b>: {desc} [{weight}p]")
-
-        for name, detail in signal.criteria_details.items():
-            if name not in signal.criteria_met:
-                desc = detail.get("description", name)
-                weight = detail.get("weight", "?")
-                criteria_lines.append(f"  ❌ {self._format_criteria_name(name)}: {desc} [{weight}p]")
-
-        criteria_text = "\n".join(criteria_lines)
-
-        exit_info = ""
-        if signal.exit_score > 0:
-            exit_info = f"\n⚠️ <b>Çıkış Puanı:</b> {signal.exit_score}/5\n"
-
-        # Manuel trade için net mesaj
         message = (
-            f"{strength_emoji} <b>ALIM SİNYALİ - {base}/{quote}</b>\n"
+            f"{score_emoji} <b>ALIM SİNYALİ — {base}/{quote}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"\n"
             f"🎯 <b>Giriş:</b> {price:,.4f} {quote}\n"
-            f"🛑 <b>Stop-Loss:</b> {sl_price:,.4f} {quote} (-%{sl_pct:.1f})\n"
-            f"💰 <b>Hedef:</b> {tp_price:,.4f} {quote} (+%{tp_pct:.1f})\n"
-            f"📊 <b>R:R Oranı:</b> 1:{tp_pct/sl_pct:.1f}\n"
+            f"🛑 <b>Stop-Loss:</b> {sl_price:,.4f} (-%{sl_pct:.1f})\n"
+            f"💰 <b>Hedef:</b> {tp_price:,.4f} (+%{tp_pct:.1f})\n"
+            f"📊 <b>R:R:</b> 1:{tp_pct/sl_pct:.1f}\n"
             f"\n"
-            f"📊 <b>Güç:</b> {strength_text} ({signal.strength}/{signal.total_criteria} — %{strength_pct*100:.0f})\n"
-            f"💼 <b>Pozisyon:</b> %{pos_size*100:.0f}"
-        )
-        if pos_tier:
-            message += f" ({pos_tier})"
-
-        message += (
+            f"<b>OCC Heatmap:</b> {score}/{max_score}p ({score_label})\n"
+            f"{heatmap_text}\n"
             f"\n"
-            f"📉 <b>RSI:</b> {rsi_str} | "
-            f"{change_emoji} <b>24s:</b> {change_24h:+.2f}%\n"
-        )
-
-        if regime_text:
-            message += f"🏷 <b>Piyasa:</b> {regime_text}{adx_str}\n"
-
-        message += (
-            f"⏱ <b>Max Tutma:</b> 7 gün\n"
-            f"\n"
-            f"<b>Kriterler:</b>\n"
-            f"{criteria_text}\n"
-            f"{exit_info}"
+            f"{rsi_emoji} {rsi_text}\n"
+            f"{adx_emoji} {adx_text}\n"
+            f"💼 Pozisyon: %{signal.position_size_pct*100:.0f} ({signal.position_tier})\n"
             f"\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -181,56 +197,35 @@ class TelegramNotifier:
 
         if chart_bytes and SEND_CHART_IMAGE:
             return self.send_photo(chart_bytes, caption=message)
-        else:
-            return self.send_message(message)
+        return self.send_message(message)
 
     # ==================== ÇIKIŞ SİNYALİ ====================
 
     def send_exit_signal(self, signal) -> bool:
-        """Çıkış sinyali bildirimini gönderir."""
         quote = "TRY" if signal.symbol.endswith("TRY") else "USDT"
         base = signal.symbol.replace("TRY", "").replace("USDT", "")
 
-        exit_lines = []
-        for name, detail in signal.exit_details.items():
-            if detail.get("met", False):
-                w = detail.get("weight", 1)
-                exit_lines.append(f"  ⚠️ {detail.get('detail', name)} [{w}p]")
-
-        exit_text = "\n".join(exit_lines)
-
         message = (
-            f"🚪 <b>ÇIKIŞ SİNYALİ - {base}/{quote}</b>\n"
+            f"🚪 <b>ÇIKIŞ SİNYALİ — {base}/{quote}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"\n"
-            f"💰 <b>Fiyat:</b> {signal.price:,.4f} {quote}\n"
-            f"📊 <b>Çıkış Puanı:</b> {signal.exit_score}/5\n"
-            f"\n"
-            f"<b>Çıkış Nedenleri:</b>\n"
-            f"{exit_text}\n"
-            f"\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Fiyat: {signal.price:,.4f} {quote}\n"
+            f"🕐 {datetime.now().strftime('%H:%M:%S')}\n"
             f"🔗 <a href='https://www.tradingview.com/chart/?symbol=BINANCE:{signal.symbol}'>TradingView</a>"
         )
-
         return self.send_message(message)
 
     # ==================== GÜNLÜK ÖZET ====================
 
     def send_daily_summary(self, signals_today: list, total_pairs_scanned: int) -> bool:
-        """Günlük özet rapor gönderir."""
         now = datetime.now()
 
         if not signals_today:
             message = (
-                f"📋 <b>GÜNLÜK ÖZET - {now.strftime('%Y-%m-%d')}</b>\n"
+                f"📋 <b>GÜNLÜK ÖZET — {now.strftime('%Y-%m-%d')}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"\n"
                 f"📊 Taranan parite: {total_pairs_scanned}\n"
-                f"⚡ Bulunan sinyal: 0\n"
-                f"\n"
-                f"Bugün alım sinyali bulunamadı.\n"
+                f"⚡ Alım sinyali: 0\n"
+                f"Bugün sinyal bulunamadı.\n"
                 f"🕐 {now.strftime('%H:%M:%S')}"
             )
         else:
@@ -238,33 +233,20 @@ class TelegramNotifier:
             for s in signals_today:
                 quote = "TRY" if s.symbol.endswith("TRY") else "USDT"
                 base = s.symbol.replace("TRY", "").replace("USDT", "")
-                regime = f" [{s.market_regime}]" if s.market_regime != "unknown" else ""
                 signal_lines.append(
-                    f"  • <b>{base}/{quote}</b> — {s.price:,.4f} {quote} "
-                    f"(güç: {s.strength}/{s.total_criteria}){regime}"
+                    f"  • <b>{base}/{quote}</b> — {s.price:,.4f} "
+                    f"(OCC puan: {s.total_score}/{s.max_score})"
                 )
 
             signals_text = "\n".join(signal_lines)
 
-            # En güçlü sinyaller
-            sorted_signals = sorted(signals_today, key=lambda s: s.strength, reverse=True)
-            top3 = sorted_signals[:3]
-            top_lines = []
-            for i, s in enumerate(top3):
-                medal = ["🥇", "🥈", "🥉"][i]
-                base = s.symbol.replace("TRY", "").replace("USDT", "")
-                top_lines.append(f"  {medal} {base} ({s.strength}/{s.total_criteria} puan)")
-
             message = (
-                f"📋 <b>GÜNLÜK ÖZET - {now.strftime('%Y-%m-%d')}</b>\n"
+                f"📋 <b>GÜNLÜK ÖZET — {now.strftime('%Y-%m-%d')}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"\n"
                 f"📊 Taranan parite: {total_pairs_scanned}\n"
-                f"⚡ Bulunan sinyal: {len(signals_today)}\n"
+                f"⚡ Alım sinyali: {len(signals_today)}\n"
                 f"\n"
-                f"<b>En güçlü sinyaller:</b>\n"
-                f"{''.join(t + chr(10) for t in top_lines)}\n"
-                f"<b>Tüm sinyaller:</b>\n"
+                f"<b>Sinyaller:</b>\n"
                 f"{signals_text}\n"
                 f"\n"
                 f"🕐 {now.strftime('%H:%M:%S')}"
@@ -272,30 +254,26 @@ class TelegramNotifier:
 
         return self.send_message(message)
 
-    # ==================== DURUM BİLDİRİMLERİ ====================
+    # ==================== BAŞLANGIÇ ====================
 
-    def send_startup(self, pair_count: int, active_modules: list = None) -> bool:
-        """Bot başlatıldığında bildirim gönderir."""
-        modules_text = ""
-        if active_modules:
-            modules_text = f"🧩 Gelişmiş modüller: {', '.join(active_modules)}\n"
+    def send_startup(self, pair_count: int) -> bool:
+        tf_list = ", ".join(f"{tf}({w}p)" for tf, (w, _, _) in OCC_TIMEFRAMES.items())
 
         message = (
-            f"🎯 <b>OCC Swing Trader Aktif!</b>\n"
+            f"🎯 <b>Multi-TF OCC Scanner Aktif!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"\n"
-            f"📊 Takip: {pair_count} TRY pariteleri\n"
-            f"🎯 Min sinyal gücü: %{MIN_SIGNAL_STRENGTH_PCT*100:.0f}\n"
-            f"⏱ Max tutma: 7 gün\n"
-            f"{modules_text}"
+            f"📊 Takip: {pair_count} parite\n"
+            f"📐 Timeframe'ler: {tf_list}\n"
+            f"🎯 Min puan eşiği: {OCC_MIN_SCORE}\n"
             f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"\n"
-            f"OCC tetiklemeli sinyaller bildirilecek..."
+            f"Her OCC renk değişiminde bildirim gönderilecek.\n"
+            f"Puan ≥{OCC_MIN_SCORE} + 15dk tetikleyici → ALIM sinyali."
         )
         return self.send_message(message)
 
     def send_error(self, error_msg: str) -> bool:
-        """Hata bildirimi gönderir."""
         message = (
             f"⚠️ <b>HATA</b>\n"
             f"{error_msg}\n"
@@ -305,27 +283,7 @@ class TelegramNotifier:
 
     # ==================== YARDIMCI ====================
 
-    def _format_criteria_name(self, name: str) -> str:
-        """Kriter ismini okunabilir formata çevirir."""
-        names = {
-            "ema_cross": "EMA Kesişim",
-            "rsi": "RSI",
-            "macd": "MACD",
-            "bollinger": "Bollinger Band",
-            "volume_spike": "Hacim Artışı",
-            "trend_filter": "Trend Filtresi",
-            "support_resistance": "Destek/Direnç",
-            "stoch_rsi": "Stochastic RSI",
-            "occ": "OCC",
-            "multi_timeframe": "Multi-TF",
-            "market_regime": "Piyasa Rejimi",
-            "time_filter": "Seans Filtresi",
-            "btc_filter": "BTC Trend",
-        }
-        return names.get(name, name)
-
     def test_connection(self) -> bool:
-        """Telegram bağlantısını test eder."""
         try:
             resp = self.session.get(f"{self.api_url}/getMe", timeout=10)
             if resp.status_code == 200:
