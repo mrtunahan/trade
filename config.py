@@ -216,6 +216,36 @@ MIN_SIGNAL_STRENGTH_PCT = 0.70  # %70 — ADX+EMA+Hacim bazlı, filtreler bonus
 # analyzer.py'de geriye uyumluluk için tutuluyor (3 olarak).
 MIN_CRITERIA_MET = 3
 
+# ==================== DİNAMİK POZİSYON BOYUTLANDIRMA ====================
+# Sinyal gücüne göre pozisyon büyüklüğü belirlenir.
+# Backtest sonucu: Adım 2 (%46.6 WR, PF 1.60) en iyi kârlılık.
+# Güçlü sinyallere daha büyük, zayıf sinyallere daha küçük pozisyon.
+POSITION_SIZING = {
+    "enabled": True,
+    "tiers": [
+        # (min_puan_yüzde, max_puan_yüzde, pozisyon_yüzde, etiket)
+        (0.85, 1.00, 1.00, "Full Sniper"),       # 11-13/13 puan → %100 pozisyon
+        (0.70, 0.85, 0.60, "High Probability"),   # 9-11/13 puan → %60 pozisyon
+    ],
+    # %70 altı = sinyal yok (MIN_SIGNAL_STRENGTH_PCT tarafından filtrelenir)
+}
+
+# ==================== DİNAMİK STOP-LOSS ====================
+# ADX bazlı adaptif stop-loss.
+# Trend piyasada: geniş SL (trend devamı için alan ver)
+# Yatay piyasada: dar SL (hızlı kes, kayıpları sınırla)
+DYNAMIC_STOP_LOSS = {
+    "enabled": True,
+    "base_sl_pct": 2.0,           # Varsayılan stop-loss %2
+    "base_tp_pct": 4.0,           # Varsayılan take-profit %4
+    "strong_trend_adx": 40,       # ADX > 40 → güçlü trend
+    "ranging_adx": 20,            # ADX < 20 → yatay piyasa
+    "trend_sl_pct": 3.0,          # Güçlü trend → SL %3 (geniş, alan ver)
+    "trend_tp_pct": 6.0,          # Güçlü trend → TP %6 (trendi kov)
+    "range_sl_pct": 1.5,          # Yatay piyasa → SL %1.5 (dar, hızlı kes)
+    "range_tp_pct": 3.0,          # Yatay piyasa → TP %3 (mütevazı hedef)
+}
+
 # ==================== BİLDİRİM AYARLARI ====================
 # Aynı parite için tekrar bildirim gönderme süresi (dakika)
 ALERT_COOLDOWN_MINUTES = 60

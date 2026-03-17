@@ -14,7 +14,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from config import CRITERIA, MIN_CRITERIA_MET, MIN_SIGNAL_STRENGTH_PCT
+from config import CRITERIA, MIN_CRITERIA_MET, MIN_SIGNAL_STRENGTH_PCT, POSITION_SIZING, DYNAMIC_STOP_LOSS
 
 logger = logging.getLogger("Analyzer")
 
@@ -75,6 +75,10 @@ class Signal:
     market_regime: str = "unknown"  # "trending", "ranging", "transition"
     exit_score: int = 0       # Çıkış stratejisi puanı
     exit_details: dict = field(default_factory=dict)  # Çıkış detayları
+    position_size_pct: float = 1.0  # Pozisyon büyüklüğü (0.0 - 1.0)
+    position_tier: str = ""         # "Full Sniper", "High Probability"
+    stop_loss_pct: float = 2.0      # Dinamik stop-loss yüzdesi
+    take_profit_pct: float = 4.0    # Dinamik take-profit yüzdesi
 
 
 class TechnicalAnalyzer:
@@ -240,6 +244,12 @@ class TechnicalAnalyzer:
                     # Sinyal oluştu - cooldown sayacını sıfırla
                     self._signal_candle_counts[symbol] = 0
 
+                    # Dinamik pozisyon boyutlandırma
+                    pos_size, pos_tier = self._calculate_position_size(strength_pct)
+
+                    # Dinamik stop-loss / take-profit (ADX bazlı)
+                    sl_pct, tp_pct = self._calculate_dynamic_sl_tp(indicators)
+
                     return Signal(
                         symbol=symbol,
                         signal_type="buy",
@@ -253,6 +263,10 @@ class TechnicalAnalyzer:
                         market_regime=market_regime,
                         exit_score=exit_score,
                         exit_details=exit_details,
+                        position_size_pct=pos_size,
+                        position_tier=pos_tier,
+                        stop_loss_pct=sl_pct,
+                        take_profit_pct=tp_pct,
                     )
 
             return None
@@ -297,6 +311,45 @@ class TechnicalAnalyzer:
         except Exception as e:
             logger.error(f"{symbol} çıkış analiz hatası: {e}", exc_info=True)
             return None
+
+    # ==================== DİNAMİK POZİSYON BOYUTLANDIRMA ====================
+
+    def _calculate_position_size(self, strength_pct: float) -> tuple:
+        """
+        Sinyal gücüne göre pozisyon büyüklüğü belirler.
+        Returns: (position_size_pct, tier_label)
+        """
+        if not POSITION_SIZING.get("enabled", False):
+            return 1.0, "Standart"
+
+        for min_pct, max_pct, pos_size, label in POSITION_SIZING["tiers"]:
+            if min_pct <= strength_pct <= max_pct:
+                return pos_size, label
+
+        return 0.60, "High Probability"  # Varsayılan
+
+    def _calculate_dynamic_sl_tp(self, indicators: dict) -> tuple:
+        """
+        ADX bazlı dinamik stop-loss ve take-profit hesaplar.
+        - Güçlü trend (ADX > 40): Geniş SL/TP (trende alan ver)
+        - Yatay piyasa (ADX < 20): Dar SL/TP (hızlı kes)
+        - Geçiş (20-40): Varsayılan
+        Returns: (stop_loss_pct, take_profit_pct)
+        """
+        cfg = DYNAMIC_STOP_LOSS
+        if not cfg.get("enabled", False):
+            return cfg.get("base_sl_pct", 2.0), cfg.get("base_tp_pct", 4.0)
+
+        adx_val = indicators.get("adx_last", float("nan"))
+        if math.isnan(adx_val):
+            return cfg["base_sl_pct"], cfg["base_tp_pct"]
+
+        if adx_val >= cfg["strong_trend_adx"]:
+            return cfg["trend_sl_pct"], cfg["trend_tp_pct"]
+        elif adx_val <= cfg["ranging_adx"]:
+            return cfg["range_sl_pct"], cfg["range_tp_pct"]
+        else:
+            return cfg["base_sl_pct"], cfg["base_tp_pct"]
 
     # ==================== MARKET REJİMİ ALGILAMA ====================
 
