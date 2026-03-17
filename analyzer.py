@@ -209,20 +209,10 @@ class MultiTfOccAnalyzer:
                     max_score += weight
                 continue
 
-            # OCC hesapla
+            # OCC hesapla (just_crossed veriden gelir, state'den değil)
             occ_status = self._check_occ_status(df, tf)
-
-            # Renk değişimi kontrolü
-            prev_state = self._prev_occ_state.get((symbol, tf))
-            just_crossed = False
-            if prev_state is not None and prev_state != occ_status.is_green:
-                just_crossed = True
-            occ_status.just_crossed = just_crossed
             occ_status.label = label
             occ_status.weight = weight
-
-            # State güncelle
-            self._prev_occ_state[(symbol, tf)] = occ_status.is_green
 
             tf_statuses.append(occ_status)
 
@@ -242,7 +232,9 @@ class MultiTfOccAnalyzer:
         # RSI hesapla (15dk veya 1H verisinden)
         rsi_value = float("nan")
         rsi_quality = ""
-        rsi_df = tf_data.get("15m") or tf_data.get("1h")
+        rsi_df = tf_data.get("15m")
+        if rsi_df is None:
+            rsi_df = tf_data.get("1h")
         if rsi_df is not None and len(rsi_df) >= 20 and RSI_CONFIG.get("enabled"):
             rsi_value = self._calculate_rsi(rsi_df)
             rsi_quality = self._assess_rsi_quality(rsi_value)
@@ -250,7 +242,9 @@ class MultiTfOccAnalyzer:
         # ADX hesapla (1H verisinden)
         adx_value = float("nan")
         adx_regime = "unknown"
-        adx_df = tf_data.get("1h") or tf_data.get("4h")
+        adx_df = tf_data.get("1h")
+        if adx_df is None:
+            adx_df = tf_data.get("4h")
         if adx_df is not None and len(adx_df) >= 30 and ADX_CONFIG.get("enabled"):
             adx_value = self._calculate_adx_value(adx_df)
             adx_regime = self._assess_adx_regime(adx_value)
