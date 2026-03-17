@@ -301,25 +301,27 @@ class BacktestEngine:
                 bars_held = bar_idx - active_trade._entry_bar_idx
                 entry_price = active_trade.entry_price
 
-                # 1. Stop-loss kontrolü (bar içi low ile)
-                sl_price = entry_price * (1 - self.stop_loss_pct / 100)
+                # 1. Stop-loss kontrolü (dinamik — ADX bazlı)
+                sl_pct = active_trade._sl_pct
+                sl_price = entry_price * (1 - sl_pct / 100)
                 if current_low <= sl_price:
                     active_trade.exit_price = sl_price
                     active_trade.exit_time = current_time
-                    active_trade.exit_reason = f"Stop-Loss ({self.stop_loss_pct}%)"
-                    active_trade.pnl_pct = -self.stop_loss_pct
+                    active_trade.exit_reason = f"Stop-Loss ({sl_pct:.1f}%)"
+                    active_trade.pnl_pct = -sl_pct * active_trade._pos_size
                     active_trade.duration_hours = bars_held * self.TF_MINUTES.get(self.timeframe, 60) / 60
                     trades.append(active_trade)
                     active_trade = None
                     continue
 
-                # 2. Take-profit kontrolü (bar içi high ile)
-                tp_price = entry_price * (1 + self.take_profit_pct / 100)
+                # 2. Take-profit kontrolü (dinamik — ADX bazlı)
+                tp_pct = active_trade._tp_pct
+                tp_price = entry_price * (1 + tp_pct / 100)
                 if current_high >= tp_price:
                     active_trade.exit_price = tp_price
                     active_trade.exit_time = current_time
-                    active_trade.exit_reason = f"Take-Profit ({self.take_profit_pct}%)"
-                    active_trade.pnl_pct = self.take_profit_pct
+                    active_trade.exit_reason = f"Take-Profit ({tp_pct:.1f}%)"
+                    active_trade.pnl_pct = tp_pct * active_trade._pos_size
                     active_trade.duration_hours = bars_held * self.TF_MINUTES.get(self.timeframe, 60) / 60
                     trades.append(active_trade)
                     active_trade = None
@@ -328,7 +330,7 @@ class BacktestEngine:
                 # 3. Exit strategy puanlaması
                 exit_sig = analyzer.check_exit_signal(symbol, window)
                 if exit_sig and exit_sig.exit_score >= 3:
-                    pnl = ((current_close - entry_price) / entry_price) * 100
+                    pnl = ((current_close - entry_price) / entry_price) * 100 * active_trade._pos_size
                     active_trade.exit_price = current_close
                     active_trade.exit_time = current_time
                     active_trade.exit_reason = f"Exit Skor ({exit_sig.exit_score}/5)"
@@ -340,7 +342,7 @@ class BacktestEngine:
 
                 # 4. Zaman bazlı timeout
                 if bars_held >= self.max_hold_bars:
-                    pnl = ((current_close - entry_price) / entry_price) * 100
+                    pnl = ((current_close - entry_price) / entry_price) * 100 * active_trade._pos_size
                     active_trade.exit_price = current_close
                     active_trade.exit_time = current_time
                     active_trade.exit_reason = f"Timeout ({self.max_hold_bars} bar)"
@@ -366,13 +368,17 @@ class BacktestEngine:
                     criteria_met=signal.criteria_met[:],
                 )
                 trade._entry_bar_idx = bar_idx
+                # Dinamik SL/TP: sinyalden al (varsa), yoksa engine default
+                trade._sl_pct = getattr(signal, "stop_loss_pct", self.stop_loss_pct)
+                trade._tp_pct = getattr(signal, "take_profit_pct", self.take_profit_pct)
+                trade._pos_size = getattr(signal, "position_size_pct", 1.0)
                 active_trade = trade
 
         # Açık kalan pozisyonu kapat (son bar'da)
         if active_trade is not None:
             last_bar = df.iloc[-1]
             bars_held = len(df) - 1 - active_trade._entry_bar_idx
-            pnl = ((float(last_bar["close"]) - active_trade.entry_price) / active_trade.entry_price) * 100
+            pnl = ((float(last_bar["close"]) - active_trade.entry_price) / active_trade.entry_price) * 100 * active_trade._pos_size
             active_trade.exit_price = float(last_bar["close"])
             active_trade.exit_time = df.index[-1]
             active_trade.exit_reason = "Backtest Sonu"
@@ -454,20 +460,6 @@ def make_step3a_criteria() -> dict:
     c["occ"]["required"] = False       # Backtest'te zorunlu kriter kaldır
     c["confluence_window"]["enabled"] = False  # Bar-by-bar state sorunu
     c["candle_cooldown"]["enabled"] = False     # Bar-by-bar state sorunu
-    return c
-
-
-def make_step3b_criteria() -> dict:
-    """
-    Adım 3b: 15M/1H Timeframe Uyumu.
-    Aynı strateji, farklı zaman dilimi kombinasyonu.
-    """
-    c = deepcopy(CRITERIA)
-    c["multi_timeframe"]["enabled"] = True
-    c["multi_timeframe"]["higher_tf"] = "1h"
-    c["occ"]["required"] = False
-    c["confluence_window"]["enabled"] = False
-    c["candle_cooldown"]["enabled"] = False
     return c
 
 
@@ -594,39 +586,24 @@ def run_step2(symbols: list, lookback: int) -> BacktestResult:
     return result
 
 
-def run_step3(symbols: list, lookback: int) -> tuple:
-    """Adım 3: 1H/4H vs 15M/1H timeframe karşılaştırması."""
+def run_step3(symbols: list, lookback: int) -> BacktestResult:
+    """Adım 3: 1H/4H Timeframe Uyumu (Tam Strateji, bonus olarak MTF)."""
     logger.info("=" * 60)
-    logger.info("ADIM 3a: 1H/4H Timeframe Uyumu (Tam Strateji)")
+    logger.info("ADIM 3: 1H/4H Timeframe Uyumu (Tam Strateji)")
     logger.info("=" * 60)
+    logger.info("15M/1H backtest'te zarar etti (PF 0.92) → devre dışı")
 
-    engine_3a = BacktestEngine(
+    engine = BacktestEngine(
         criteria_override=make_step3a_criteria(),
-        min_strength_pct=0.65,  # 12 puanlık sistemde ~8/12 = %65+
+        min_strength_pct=0.65,
         timeframe="1h",
         stop_loss_pct=2.0,
         take_profit_pct=4.0,
         max_hold_bars=48,
     )
-    result_3a = engine_3a.run(symbols, label="Adım 3a: 1H/4H (Tam)", lookback_bars=lookback)
-    result_3a.print_summary()
-
-    logger.info("=" * 60)
-    logger.info("ADIM 3b: 15M/1H Timeframe Uyumu (Tam Strateji)")
-    logger.info("=" * 60)
-
-    engine_3b = BacktestEngine(
-        criteria_override=make_step3b_criteria(),
-        min_strength_pct=0.65,
-        timeframe="15m",
-        stop_loss_pct=1.5,  # Daha kısa TF → daha dar SL/TP
-        take_profit_pct=3.0,
-        max_hold_bars=96,   # 15m × 96 = 24 saat
-    )
-    result_3b = engine_3b.run(symbols, label="Adım 3b: 15M/1H (Tam)", lookback_bars=min(lookback * 4, 1000))
-    result_3b.print_summary()
-
-    return result_3a, result_3b
+    result = engine.run(symbols, label="Adım 3: 1H/4H (Tam)", lookback_bars=lookback)
+    result.print_summary()
+    return result
 
 
 def run_full(symbols: list, lookback: int) -> BacktestResult:
@@ -695,14 +672,12 @@ def main():
         results.append(run_step1(symbols, args.bars))
         results.append(run_step2(symbols, args.bars))
     elif args.step == 3:
-        r3a, r3b = run_step3(symbols, args.bars)
-        results.extend([r3a, r3b])
+        results.append(run_step3(symbols, args.bars))
     else:
         # Tüm adımlar
         results.append(run_step1(symbols, args.bars))
         results.append(run_step2(symbols, args.bars))
-        r3a, r3b = run_step3(symbols, args.bars)
-        results.extend([r3a, r3b])
+        results.append(run_step3(symbols, args.bars))
         results.append(run_full(symbols, args.bars))
 
     # Karşılaştırma tablosu

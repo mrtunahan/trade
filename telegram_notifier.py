@@ -84,12 +84,12 @@ class TelegramNotifier:
         """
         # Ağırlıklı güç yüzdesi
         strength_pct = signal.strength_pct
-        if strength_pct >= 0.95:
+        if strength_pct >= 0.85:
             strength_emoji = "🔥🔥🔥"
-            strength_text = "Mükemmel"
-        elif strength_pct >= 0.90:
+            strength_text = "Full Sniper"
+        elif strength_pct >= 0.70:
             strength_emoji = "🔥🔥"
-            strength_text = "Çok Güçlü"
+            strength_text = "High Probability"
         else:
             strength_emoji = "🔥"
             strength_text = "Güçlü"
@@ -153,6 +153,24 @@ class TelegramNotifier:
 
         if regime_text:
             message += f"🏷 <b>Piyasa:</b> {regime_text}{adx_str}\n"
+
+        # Pozisyon boyutu ve dinamik SL/TP
+        pos_size = getattr(signal, "position_size_pct", 1.0)
+        pos_tier = getattr(signal, "position_tier", "")
+        sl_pct = getattr(signal, "stop_loss_pct", 2.0)
+        tp_pct = getattr(signal, "take_profit_pct", 4.0)
+
+        message += (
+            f"\n"
+            f"💼 <b>Pozisyon:</b> %{pos_size*100:.0f}"
+        )
+        if pos_tier:
+            message += f" ({pos_tier})"
+        message += (
+            f"\n"
+            f"🛑 <b>Stop-Loss:</b> %{sl_pct:.1f} | "
+            f"🎯 <b>Take-Profit:</b> %{tp_pct:.1f}\n"
+        )
 
         message += (
             f"\n"
@@ -305,6 +323,8 @@ class TelegramNotifier:
             "occ": "OCC",
             "multi_timeframe": "Multi-TF",
             "market_regime": "Piyasa Rejimi",
+            "time_filter": "Seans Filtresi",
+            "btc_filter": "BTC Trend",
         }
         return names.get(name, name)
 
