@@ -26,7 +26,7 @@ BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 BINANCE_BASE_URL   = "https://api.binance.me"
 
 # ==================== TARAMA AYARLARI ====================
-SCAN_INTERVAL = 60       # Her 60 saniyede bir tara
+SCAN_INTERVAL = 900      # Her 15 dakikada bir tara (tarama ~11dk sürüyor)
 KLINE_INTERVAL = "15m"   # Tetikleyici timeframe (15dk)
 KLINE_LIMIT = 250
 
@@ -125,7 +125,7 @@ DYNAMIC_STOP_LOSS = {
 ALERT_COOLDOWN_MINUTES = 30   # Aynı sembol+TF için cooldown
 SEND_CHART_IMAGE = True
 DAILY_SUMMARY_HOUR = 21
-NOTIFY_ALL_TF_CHANGES = True  # Her TF'deki renk değişimini bildir
+NOTIFY_ALL_TF_CHANGES = False  # Kapalı: yüzlerce renk değişimi spam yapıyordu
 
 # ==================== LOGLAMA ====================
 LOG_FILE  = "scanner.log"
