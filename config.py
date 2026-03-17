@@ -1,5 +1,8 @@
 # ============================================================================
-# config.py - Tarayıcı Yapılandırma Dosyası
+# config.py - OCC Swing Trader Yapılandırma Dosyası
+# ============================================================================
+# Tek strateji: OCC-merkezli swing trading (TRY pariteleri, max 1 hafta)
+# Manuel trade için sinyal üretici — bot otomatik işlem yapmaz.
 # ============================================================================
 
 import os
@@ -17,56 +20,73 @@ BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 BINANCE_BASE_URL   = "https://api.binance.me"
 
 # ==================== TARAMA AYARLARI ====================
-# Tarama aralığı (saniye)
 SCAN_INTERVAL = 60  # Her 60 saniyede bir tara
-
-# Mum zaman dilimi
-KLINE_INTERVAL = "1h"  # 1m, 5m, 15m, 30m, 1h, 4h, 1d
-
-# Kaç mum getirilsin (indikatör hesabı için yeterli olmalı)
+KLINE_INTERVAL = "1h"  # Ana zaman dilimi
 KLINE_LIMIT = 250
 
-# ==================== TAKİP EDİLECEK PARİTELER ====================
-# "auto" = BinanceTR'deki tüm TRY ve USDT çiftlerini otomatik bul
-# veya elle liste verin
+# ==================== SADECE TRY PARİTELERİ ====================
 PAIR_MODE = "auto"  # "auto" veya "manual"
+ONLY_TRY = True     # Sadece TRY paritelerini tara (USDT hariç)
 
-# Manuel mod için listeler
 MANUAL_TRY_PAIRS = [
     "BTCTRY", "ETHTRY", "BNBTRY", "XRPTRY", "SOLTRY",
     "AVXTRY", "DOGETRY", "ADATRY", "DOTTRY", "MATICTRY",
     "LINKTRY", "SHIBTRY", "LTCTRY", "USDTTRY",
 ]
 
-MANUAL_USDT_PAIRS = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT",
-    "AVAXUSDT", "DOGEUSDT", "ADAUSDT", "DOTUSDT", "MATICUSDT",
-    "LINKUSDT", "SHIBUSDT", "LTCUSDT", "AAVEUSDT", "UNIUSDT",
-    "NEARUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "FETUSDT",
-]
+# USDT pariteleri artık kullanılmıyor (sadece BTC filtresi için BTCUSDT çekilir)
+MANUAL_USDT_PAIRS = []
 
 # Minimum 24s işlem hacmi filtresi (USDT cinsinden)
-MIN_VOLUME_USDT = 100_000  # 100K USD altı çiftleri atla
+MIN_VOLUME_USDT = 100_000
+
+# ==================== MAKSİMUM POZİSYON SÜRESİ ====================
+MAX_HOLD_BARS = 168  # 7 gün × 24 saat = 168 bar (1H timeframe)
 
 # ==================== SİNYAL KRİTERLERİ ====================
-# Bu bölümü istediğiniz kriterlere göre güncelleyin.
-# Her kriter açılıp kapatılabilir.
+# TEK STRATEJİ: OCC-merkezli swing trading
+#
+# Katman 1 — Tetikleyici (Zorunlu):
+#   OCC Alert R6.2 = Alım sinyalinin tetikleyicisi. OCC olmadan sinyal yok.
+#
+# Katman 2 — Doğrulama (Puanlama):
+#   Trend(2) + EMA(1) + RSI(1) + MACD(1) + Bollinger(1) + StochRSI(1) + Hacim(1)
+#
+# Katman 3 — Bonus (Opsiyonel):
+#   BTC Trend(1) + 4H MTF(1) + Seans(1)
+#
+# OCC(2) + Doğrulama(8) + Bonus(3) = 13 puan
+# Eşik: %60 = ~8/13 puan (OCC 2 puan zaten sabit)
 
 CRITERIA = {
+    # --- OCC (Open Close Cross) Non-Repaint --- ANA TETİKLEYİCİ
+    # Close MA ve Open MA kesişimine dayalı sinyal.
+    # JustUncleL'ın OCC Alert R6.2 indikatöründen esinlenilmiştir.
+    # Non-repaint: Sadece kapanmış mumlara bakılır.
+    # ZORUNLU: OCC tetiklenmeden sinyal üretilmez.
+    "occ": {
+        "enabled": True,
+        "period": 5,
+        "ma_type": "EMA",
+        "min_strength": 0.01,
+        "weight": 2,
+        "required": True,  # ZORUNLU — OCC olmadan sinyal yok
+    },
+
     # --- EMA Crossover ---
     "ema_cross": {
         "enabled": True,
         "fast": 9,
         "slow": 21,
-        "weight": 1,              # Ağırlık puanı
+        "weight": 1,
     },
 
     # --- RSI ---
     "rsi": {
         "enabled": True,
         "period": 14,
-        "oversold": 30,           # Aşırı satım (güçlü sinyal)
-        "oversold_zone": 40,      # Potansiyel alım bölgesi (30-40 arası)
+        "oversold": 30,
+        "oversold_zone": 40,
         "overbought": 70,
         "weight": 1,
     },
@@ -92,7 +112,7 @@ CRITERIA = {
     "volume_spike": {
         "enabled": True,
         "ma_period": 20,
-        "multiplier": 1.5,        # 2.0'dan 1.5'e düşürüldü (daha hassas)
+        "multiplier": 1.5,
         "weight": 1,
     },
 
@@ -101,15 +121,7 @@ CRITERIA = {
         "enabled": True,
         "ema_period": 200,
         "mode": "above",
-        "weight": 2,              # Trend yönü çok önemli → 2 puan
-    },
-
-    # --- Destek/Direnç Yakınlığı ---
-    "support_resistance": {
-        "enabled": False,
-        "lookback": 50,
-        "proximity_pct": 1.0,
-        "weight": 1,
+        "weight": 2,
     },
 
     # --- Stochastic RSI ---
@@ -123,149 +135,113 @@ CRITERIA = {
         "weight": 1,
     },
 
-    # --- OCC (Open Close Cross) Non-Repaint ---
-    # Close MA ve Open MA kesişimine dayalı sinyal.
-    # JustUncleL'ın OCC Alert R6.2 indikatöründen esinlenilmiştir.
-    # Non-repaint: Sadece kapanmış mumlara bakılır.
-    # Yumuşak filtre: +2 bonus puan, zorunlu değil.
-    "occ": {
-        "enabled": True,
-        "period": 5,
-        "ma_type": "EMA",
-        "min_strength": 0.01,
-        "weight": 2,              # Ana sinyal üreticisi → 2 puan
-        "required": False,        # YUMUŞAK: OCC bonus filtre, zorunlu değil
+    # --- Destek/Direnç Yakınlığı ---
+    "support_resistance": {
+        "enabled": False,
+        "lookback": 50,
+        "proximity_pct": 1.0,
+        "weight": 1,
     },
 
     # --- Market Rejimi (ADX Bazlı) ---
-    # ADX > 25 → Trend piyasa (trend kriterlerine daha fazla ağırlık)
-    # ADX < 20 → Yatay piyasa (Bollinger/StochRSI'a daha fazla ağırlık)
     "market_regime": {
         "enabled": True,
         "adx_period": 14,
-        "trend_threshold": 25,     # ADX > 25 → Güçlü trend
-        "range_threshold": 20,     # ADX < 20 → Yatay piyasa
-        "weight": 0,               # Kendi puanı yok, diğer ağırlıkları dinamik ayarlar
+        "trend_threshold": 25,
+        "range_threshold": 20,
+        "weight": 0,  # Puanlama yapmaz, SL/TP ve ağırlık dinamiğini yönetir
     },
 
-    # --- Multi-Timeframe Doğrulama ---
-    # 4H uyumu = pozisyon boyutu çarpanı (confidence multiplier)
-    # Varsa +%50 pozisyon büyüklüğü, yoksa normal pozisyonla devam
-    # Puanlama: +1 bonus puan + pozisyon çarpanı
+    # --- Multi-Timeframe Doğrulama (4H) ---
     "multi_timeframe": {
         "enabled": True,
-        "higher_tf": "4h",         # Üst zaman dilimi (1h → 4h)
-        "weight": 1,               # +1 bonus puan
-        "confidence_multiplier": 1.5,  # 4H onayı varsa pozisyon %50 büyüt
+        "higher_tf": "4h",
+        "weight": 1,
+        "confidence_multiplier": 1.5,
     },
 
     # --- Zaman Filtresi (Seans Bazlı) ---
-    # Yumuşak filtre: düşük hacimli saatlerde eşik yükseltme yerine
-    # bonus puan olarak çalışır (seans içi = +1 puan)
     "time_filter": {
         "enabled": True,
-        "high_volume_hours_utc": [(13, 21)],   # Avrupa+Amerika örtüşmesi (UTC)
-        "low_volume_penalty": False,            # Sert eşik cezası KAPALI
-        "weight": 1,                            # Yüksek hacim saati = +1 bonus puan
+        "high_volume_hours_utc": [(13, 21)],
+        "low_volume_penalty": False,
+        "weight": 1,
     },
 
     # --- BTC Filtresi ---
-    # Yumuşak filtre: BTC yükselişte ise +1 bonus puan
-    # BTC düşüşte ise puan vermez ama sinyal iptal etmez
     "btc_filter": {
         "enabled": True,
-        "weight": 1,               # BTC yükselişte = +1 bonus puan
+        "weight": 1,
     },
 
-    # --- Confluence Window (Sinyal Çakışma Penceresi) ---
-    # OCC tetiklendikten sonra 3 mum içinde diğer kriterlerin tamamlanmasını bekle
+    # --- Confluence Window ---
+    # OCC tetiklendikten sonra 3 mum içinde diğer doğrulama kriterlerini bekle
     "confluence_window": {
         "enabled": True,
-        "window_candles": 3,       # OCC'den sonra kaç mum içinde tamamlanmalı
+        "window_candles": 3,
     },
 
     # --- Cooldown (Mum Bazlı) ---
-    # Sinyal sonrası belirli mum sayısı kadar yeni sinyal üretme
     "candle_cooldown": {
         "enabled": True,
-        "cooldown_candles": 5,     # Sinyal sonrası 5 mum sessizlik
+        "cooldown_candles": 5,
     },
 
     # --- Çıkış Stratejisi Puanlaması ---
-    # Giriş gibi puanlama sistemiyle kademeli çıkış sinyali
     "exit_strategy": {
         "enabled": True,
-        "occ_reverse_weight": 2,    # OCC ters kesişim
-        "rsi_overbought_weight": 1, # RSI aşırı alım
-        "volume_drop_weight": 1,    # Hacim düşüşü
-        "stoch_overbought_weight": 1,  # StochRSI aşırı alım
-        "min_exit_score": 3,        # Minimum çıkış puanı
+        "occ_reverse_weight": 2,
+        "rsi_overbought_weight": 1,
+        "volume_drop_weight": 1,
+        "stoch_overbought_weight": 1,
+        "min_exit_score": 3,
     },
 }
 
 # ==================== AĞIRLIKLI PUANLAMA ====================
-# Katman 1 — Temel (Adım 2 bazlı):
-#   Trend(2) + EMA(1) + Hacim(1) + RSI(1) + MACD(1) + Bollinger(1) + StochRSI(1) = 8
-# Katman 2 — Yumuşak filtre (bonus):
-#   OCC(2) + BTC(1) + Zaman(1) = 4
-# Katman 3 — Confidence (pozisyon çarpanı):
-#   MTF/4H(1) = 1 puan + varsa pozisyon %50 büyüt
-# Toplam: 13 puan, %70 eşik = ~9/13
-# Backtest: Adım 2 (PF 1.60, +150% PnL) temel strateji.
+# OCC (2, zorunlu) + Trend(2) + EMA(1) + RSI(1) + MACD(1) + BB(1)
+#   + StochRSI(1) + Hacim(1) + MTF(1) + BTC(1) + Seans(1) = 13
+# Eşik: %60 = ~8/13 (OCC'nin 2 puanı dahil)
+MIN_SIGNAL_STRENGTH_PCT = 0.60
 
-# Minimum ağırlıklı puan yüzdesi (0.0 - 1.0)
-# Sadece bu eşiğin üstündeki sinyaller Telegram'a gönderilir
-MIN_SIGNAL_STRENGTH_PCT = 0.70  # %70 — ADX+EMA+Hacim bazlı, filtreler bonus
-
-# Eski MIN_CRITERIA_MET artık ağırlıklı sistemde kullanılmıyor ama
-# analyzer.py'de geriye uyumluluk için tutuluyor (3 olarak).
+# Geriye uyumluluk
 MIN_CRITERIA_MET = 3
 
 # ==================== DİNAMİK POZİSYON BOYUTLANDIRMA ====================
-# Sinyal gücüne göre pozisyon büyüklüğü belirlenir.
-# Backtest sonucu: Adım 2 (%46.6 WR, PF 1.60) en iyi kârlılık.
-# Güçlü sinyallere daha büyük, zayıf sinyallere daha küçük pozisyon.
 POSITION_SIZING = {
     "enabled": True,
     "tiers": [
         # (min_puan_yüzde, max_puan_yüzde, pozisyon_yüzde, etiket)
-        (0.85, 1.00, 1.00, "Full Sniper"),       # 11-13/13 puan → %100 pozisyon
-        (0.70, 0.85, 0.60, "High Probability"),   # 9-11/13 puan → %60 pozisyon
+        (0.85, 1.00, 1.00, "Full Sniper"),
+        (0.70, 0.85, 0.75, "Strong"),
+        (0.60, 0.70, 0.50, "Normal"),
     ],
-    # %70 altı = sinyal yok (MIN_SIGNAL_STRENGTH_PCT tarafından filtrelenir)
 }
 
 # ==================== DİNAMİK STOP-LOSS ====================
-# ADX bazlı adaptif stop-loss + ATR trailing stop.
-# Trend piyasada: geniş SL + trailing stop (kârı koştur)
-# Yatay piyasada: dar SL + sabit TP (hızlı kes)
+# Swing trading için ayarlanmış SL/TP (1 haftalık tutma süresi)
 DYNAMIC_STOP_LOSS = {
     "enabled": True,
-    "base_sl_pct": 2.0,           # Varsayılan stop-loss %2
-    "base_tp_pct": 4.0,           # Varsayılan take-profit %4
-    "strong_trend_adx": 40,       # ADX > 40 → güçlü trend
-    "ranging_adx": 20,            # ADX < 20 → yatay piyasa
-    "trend_sl_pct": 3.0,          # Güçlü trend → SL %3 (geniş, alan ver)
-    "trend_tp_pct": 8.0,          # Güçlü trend → TP %8 (trendi kov, trailing ile daha fazla)
-    "range_sl_pct": 1.5,          # Yatay piyasa → SL %1.5 (dar, hızlı kes)
-    "range_tp_pct": 3.0,          # Yatay piyasa → TP %3 (mütevazı hedef)
-    # ATR Trailing Stop (sadece trending rejimde)
+    "base_sl_pct": 3.0,           # Varsayılan stop-loss %3
+    "base_tp_pct": 6.0,           # Varsayılan take-profit %6
+    "strong_trend_adx": 40,
+    "ranging_adx": 20,
+    "trend_sl_pct": 4.0,          # Güçlü trend → SL %4 (geniş, trende alan ver)
+    "trend_tp_pct": 10.0,         # Güçlü trend → TP %10 (1 haftada gerçekçi)
+    "range_sl_pct": 2.0,          # Yatay piyasa → SL %2
+    "range_tp_pct": 4.0,          # Yatay piyasa → TP %4
+    # ATR Trailing Stop
     "trailing_stop": {
         "enabled": True,
-        "atr_multiplier": 2.0,    # Trailing stop = 2x ATR
-        "activation_pct": 1.5,    # %1.5 kâra geçince trailing başlar
+        "atr_multiplier": 2.5,    # Swing trade için 2.5x ATR
+        "activation_pct": 2.0,    # %2 kâra geçince trailing başlar
     },
 }
 
 # ==================== BİLDİRİM AYARLARI ====================
-# Aynı parite için tekrar bildirim gönderme süresi (dakika)
 ALERT_COOLDOWN_MINUTES = 60
-
-# Bildirimde grafik görseli gönder
 SEND_CHART_IMAGE = True
-
-# Günlük özet rapor saati (24 saat formatı)
-DAILY_SUMMARY_HOUR = 21  # 21:00'de günlük özet
+DAILY_SUMMARY_HOUR = 21
 
 # ==================== LOGLAMA ====================
 LOG_FILE  = "scanner.log"
@@ -286,6 +262,7 @@ def validate_config():
 
     _logger.info(f"Aktif kriterler: {enabled_count}, Toplam ağırlık: {total_weight}, "
                  f"Zorunlu kriterler: {required_count}, Min sinyal gücü: %{MIN_SIGNAL_STRENGTH_PCT*100:.0f}")
+    _logger.info(f"Mod: Sadece TRY | Max tutma: {MAX_HOLD_BARS} bar ({MAX_HOLD_BARS//24} gün) | OCC zorunlu")
 
     if not TELEGRAM_BOT_TOKEN:
         _logger.warning("TELEGRAM_BOT_TOKEN ayarlanmamış!")

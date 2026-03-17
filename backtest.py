@@ -1,14 +1,14 @@
 # ============================================================================
-# backtest.py - Backtest Motoru
+# backtest.py - OCC Swing Trader Backtest Motoru
 # ============================================================================
-# Tarihi veri üzerinde strateji performansını ölçer.
-# Look-ahead bias ve overfitting kontrolü ile gerçekçi sonuçlar üretir.
+# Tek strateji: OCC-merkezli swing trading (TRY pariteleri, max 1 hafta)
+# Walk-forward, look-ahead bias korumalı bar-by-bar replay.
 #
 # Kullanım:
-#   python backtest.py                          (varsayılan 3 adımlı test)
-#   python backtest.py --step 1                 (sadece Adım 1)
-#   python backtest.py --symbol BTCUSDT         (tek parite)
-#   python backtest.py --days 90                (son 90 gün)
+#   python backtest.py                          (TRY paritelerinde backtest)
+#   python backtest.py --symbol BTCTRY          (tek parite)
+#   python backtest.py --bars 1000              (son 1000 bar)
+#   python backtest.py --symbols 20             (en fazla 20 parite)
 # ============================================================================
 
 import sys
@@ -24,7 +24,10 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from config import CRITERIA, KLINE_INTERVAL, KLINE_LIMIT, MIN_SIGNAL_STRENGTH_PCT, DYNAMIC_STOP_LOSS
+from config import (
+    CRITERIA, KLINE_INTERVAL, KLINE_LIMIT, MIN_SIGNAL_STRENGTH_PCT,
+    DYNAMIC_STOP_LOSS, MAX_HOLD_BARS,
+)
 from market_data import MarketData
 from analyzer import TechnicalAnalyzer
 
@@ -136,13 +139,11 @@ class BacktestResult:
 
     @property
     def expectancy(self) -> float:
-        """Her işlemden beklenen ortalama kâr/zarar (%)."""
         if self.total_trades == 0:
             return 0.0
         return self.total_pnl / self.total_trades
 
     def print_summary(self):
-        """Sonuç özetini yazdırır."""
         print(f"\n{'=' * 70}")
         print(f"  {self.label}")
         print(f"{'=' * 70}")
@@ -155,13 +156,12 @@ class BacktestResult:
         print(f"  Max Drawdown     : {self.max_drawdown:.2f}%")
         print(f"  Ort. Kazanç      : {self.avg_win:+.2f}%")
         print(f"  Ort. Kayıp       : {self.avg_loss:+.2f}%")
-        print(f"  Ort. Süre        : {self.avg_duration_hours:.1f} saat")
+        print(f"  Ort. Süre        : {self.avg_duration_hours:.1f} saat ({self.avg_duration_hours/24:.1f} gün)")
         print(f"  Toplam Bar       : {self.total_bars}")
         print(f"{'─' * 70}")
 
         if self.win_rate > 65:
             print(f"  ⚠️  UYARI: Win rate %{self.win_rate:.0f} > %65 — Overfitting riski!")
-            print(f"  ⚠️  Gerçekçi hedef: %55-%65 arası")
         if self.total_trades < 30:
             print(f"  ⚠️  UYARI: {self.total_trades} işlem istatistiksel olarak yetersiz (min 30+)")
 
@@ -169,21 +169,16 @@ class BacktestResult:
 # ==================== BACKTEST MOTORU ====================
 class BacktestEngine:
     """
-    Bar-by-bar (Walk-Forward) backtest motoru.
+    OCC-merkezli swing trader backtest motoru.
+
+    Tek strateji: OCC tetikleyici + doğrulama kriterleri.
+    Max 1 hafta tutma süresi. TRY pariteleri.
 
     Look-ahead bias önleme:
     - Her bar sadece o ana kadar mevcut veriyle analiz edilir
-    - Gelecek veriye erişim yok
-    - OCC zaten non-repaint (iloc[-2] kullanır)
-
-    Çıkış stratejileri:
-    1. Exit Strategy puanlaması (OCC reverse, RSI overbought, vb.)
-    2. Stop-loss: ATR bazlı (%2 veya 2xATR)
-    3. Take-profit: ATR bazlı (%4 veya 3xATR)
-    4. Zaman bazlı timeout (max 48 bar = 48 saat for 1h)
+    - OCC non-repaint (iloc[-2] kullanır)
     """
 
-    # Zaman dilimi → dakika eşlemesi
     TF_MINUTES = {
         "1m": 1, "5m": 5, "15m": 15, "30m": 30,
         "1h": 60, "4h": 240, "1d": 1440, "1w": 10080,
@@ -192,38 +187,15 @@ class BacktestEngine:
     def __init__(self, criteria_override: dict = None,
                  min_strength_pct: float = None,
                  timeframe: str = None,
-                 stop_loss_pct: float = 2.0,
-                 take_profit_pct: float = 4.0,
-                 max_hold_bars: int = 48):
-        """
-        Args:
-            criteria_override: Özel kriter konfigürasyonu (None=varsayılan)
-            min_strength_pct: Minimum sinyal gücü eşiği (None=config'den)
-            timeframe: Zaman dilimi (None=config'den)
-            stop_loss_pct: Stop-loss yüzdesi
-            take_profit_pct: Take-profit yüzdesi
-            max_hold_bars: Maksimum pozisyon tutma süresi (bar)
-        """
+                 max_hold_bars: int = None):
         self.criteria = criteria_override or deepcopy(CRITERIA)
         self.min_strength_pct = min_strength_pct or MIN_SIGNAL_STRENGTH_PCT
         self.timeframe = timeframe or KLINE_INTERVAL
-        self.stop_loss_pct = stop_loss_pct
-        self.take_profit_pct = take_profit_pct
-        self.max_hold_bars = max_hold_bars
+        self.max_hold_bars = max_hold_bars or MAX_HOLD_BARS
         self.market = MarketData()
 
     def run(self, symbols: list, label: str = "Backtest",
-            lookback_bars: int = 500) -> BacktestResult:
-        """
-        Belirtilen semboller üzerinde backtest çalıştırır.
-
-        Args:
-            symbols: Test edilecek sembol listesi
-            label: Sonuç etiketi
-            lookback_bars: Kaç bar geriye bakılacak
-
-        Returns: BacktestResult
-        """
+            lookback_bars: int = 1000) -> BacktestResult:
         all_trades = []
         total_bars = 0
 
@@ -233,20 +205,14 @@ class BacktestEngine:
             all_trades.extend(trades)
             total_bars += bars
 
-        result = BacktestResult(
+        return BacktestResult(
             label=label,
             trades=all_trades,
             total_bars=total_bars,
             timeframe=self.timeframe,
         )
-        return result
 
     def _backtest_symbol(self, symbol: str, lookback_bars: int) -> tuple:
-        """
-        Tek sembol için bar-by-bar backtest.
-        Returns: (trades_list, bars_scanned)
-        """
-        # Veri çek
         df = self.market.get_klines(symbol, interval=self.timeframe, limit=lookback_bars)
         if df is None or len(df) < 100:
             logger.warning(f"{symbol}: Yetersiz veri ({len(df) if df is not None else 0} bar)")
@@ -259,21 +225,27 @@ class BacktestEngine:
             higher_tf = mtf_cfg.get("higher_tf", "4h")
             htf_df = self.market.get_klines(symbol, interval=higher_tf, limit=lookback_bars)
 
-        # BTC veri
+        # BTC veri (BTC filtresi için — BTCUSDT veya BTCTRY)
         btc_df = None
         btc_cfg = self.criteria.get("btc_filter", {})
         if btc_cfg.get("enabled", False):
             btc_df = self.market.get_klines("BTCUSDT", interval=self.timeframe, limit=lookback_bars)
+            if btc_df is None or len(btc_df) < 50:
+                btc_df = self.market.get_klines("BTCTRY", interval=self.timeframe, limit=lookback_bars)
 
         trades = []
         active_trade = None
-        min_warmup = 200  # İndikatörlerin ısınması için ilk N bar atla
+        min_warmup = 200
 
-        # Her bar analiz et
-        analyzer = TechnicalAnalyzer(criteria=self.criteria, min_strength_pct=self.min_strength_pct)
+        # Backtest'te confluence_window ve candle_cooldown kapalı
+        # (bar-by-bar replay'de state sorunu yaratır)
+        bt_criteria = deepcopy(self.criteria)
+        bt_criteria["confluence_window"]["enabled"] = False
+        bt_criteria["candle_cooldown"]["enabled"] = False
+
+        analyzer = TechnicalAnalyzer(criteria=bt_criteria, min_strength_pct=self.min_strength_pct)
 
         for bar_idx in range(min_warmup, len(df)):
-            # Sadece o ana kadar olan veriyi ver (look-ahead bias önleme)
             window = df.iloc[:bar_idx + 1]
             current_bar = df.iloc[bar_idx]
             current_time = df.index[bar_idx]
@@ -281,15 +253,12 @@ class BacktestEngine:
             current_high = float(current_bar["high"])
             current_low = float(current_bar["low"])
 
-            # HTF penceresi (varsa)
             htf_window = None
             if htf_df is not None and len(htf_df) > 50:
-                # HTF'de mevcut zamana kadar olan veriyi al
                 htf_window = htf_df[htf_df.index <= current_time]
                 if len(htf_window) < 50:
                     htf_window = None
 
-            # BTC penceresi (varsa)
             btc_window = None
             if btc_df is not None and len(btc_df) > 50:
                 btc_window = btc_df[btc_df.index <= current_time]
@@ -301,7 +270,7 @@ class BacktestEngine:
                 bars_held = bar_idx - active_trade._entry_bar_idx
                 entry_price = active_trade.entry_price
 
-                # 1. Stop-loss kontrolü (dinamik — ADX bazlı)
+                # 1. Stop-loss (dinamik — ADX bazlı)
                 sl_pct = active_trade._sl_pct
                 sl_price = entry_price * (1 - sl_pct / 100)
                 if current_low <= sl_price:
@@ -314,25 +283,21 @@ class BacktestEngine:
                     active_trade = None
                     continue
 
-                # 2. ATR Trailing Stop (sadece trending rejimde)
+                # 2. ATR Trailing Stop
                 trail_cfg = DYNAMIC_STOP_LOSS.get("trailing_stop", {})
                 if (trail_cfg.get("enabled", False) and
                         active_trade._regime in ("trending", "transition")):
-                    # Trailing high güncelle
                     if current_high > active_trade._trailing_high:
                         active_trade._trailing_high = current_high
 
                     current_pnl_pct = ((current_high - entry_price) / entry_price) * 100
-                    activation = trail_cfg.get("activation_pct", 1.5)
+                    activation = trail_cfg.get("activation_pct", 2.0)
 
-                    # Trailing aktive ol
                     if current_pnl_pct >= activation:
                         active_trade._trailing_active = True
 
-                    # Trailing aktifse, ATR bazlı stop hesapla
                     if active_trade._trailing_active:
-                        atr_mult = trail_cfg.get("atr_multiplier", 2.0)
-                        # ATR hesapla (son 14 bar)
+                        atr_mult = trail_cfg.get("atr_multiplier", 2.5)
                         if bar_idx >= 14:
                             recent = df.iloc[bar_idx - 14:bar_idx + 1]
                             tr_vals = pd.concat([
@@ -342,7 +307,7 @@ class BacktestEngine:
                             ], axis=1).max(axis=1)
                             atr_val = float(tr_vals.mean())
                         else:
-                            atr_val = entry_price * 0.02  # Fallback %2
+                            atr_val = entry_price * 0.02
 
                         trail_stop = active_trade._trailing_high - (atr_val * atr_mult)
 
@@ -357,7 +322,7 @@ class BacktestEngine:
                             active_trade = None
                             continue
 
-                # 3. Take-profit kontrolü (dinamik — ADX bazlı, trailing yoksa)
+                # 3. Take-profit (trailing yoksa)
                 tp_pct = active_trade._tp_pct
                 tp_price = entry_price * (1 + tp_pct / 100)
                 if current_high >= tp_price and not active_trade._trailing_active:
@@ -370,7 +335,7 @@ class BacktestEngine:
                     active_trade = None
                     continue
 
-                # 5. Exit strategy puanlaması
+                # 4. Exit strategy puanlaması
                 exit_sig = analyzer.check_exit_signal(symbol, window)
                 if exit_sig and exit_sig.exit_score >= 3:
                     pnl = ((current_close - entry_price) / entry_price) * 100 * active_trade._pos_size
@@ -383,19 +348,18 @@ class BacktestEngine:
                     active_trade = None
                     continue
 
-                # 6. Zaman bazlı timeout
+                # 5. Zaman bazlı timeout (max 1 hafta)
                 if bars_held >= self.max_hold_bars:
                     pnl = ((current_close - entry_price) / entry_price) * 100 * active_trade._pos_size
                     active_trade.exit_price = current_close
                     active_trade.exit_time = current_time
-                    active_trade.exit_reason = f"Timeout ({self.max_hold_bars} bar)"
+                    active_trade.exit_reason = f"Timeout ({self.max_hold_bars} bar = {self.max_hold_bars//24} gün)"
                     active_trade.pnl_pct = pnl
                     active_trade.duration_hours = bars_held * self.TF_MINUTES.get(self.timeframe, 60) / 60
                     trades.append(active_trade)
                     active_trade = None
                     continue
 
-                # Pozisyon hâlâ açık, sinyal aramaya gerek yok
                 continue
 
             # Sinyal ara (pozisyon yoksa)
@@ -411,17 +375,15 @@ class BacktestEngine:
                     criteria_met=signal.criteria_met[:],
                 )
                 trade._entry_bar_idx = bar_idx
-                # Dinamik SL/TP: sinyalden al (varsa), yoksa engine default
-                trade._sl_pct = getattr(signal, "stop_loss_pct", self.stop_loss_pct)
-                trade._tp_pct = getattr(signal, "take_profit_pct", self.take_profit_pct)
+                trade._sl_pct = getattr(signal, "stop_loss_pct", 3.0)
+                trade._tp_pct = getattr(signal, "take_profit_pct", 6.0)
                 trade._pos_size = getattr(signal, "position_size_pct", 1.0)
-                # Trailing stop state
                 trade._trailing_active = False
                 trade._trailing_high = current_close
                 trade._regime = signal.market_regime
                 active_trade = trade
 
-        # Açık kalan pozisyonu kapat (son bar'da)
+        # Açık kalan pozisyonu kapat
         if active_trade is not None:
             last_bar = df.iloc[-1]
             bars_held = len(df) - 1 - active_trade._entry_bar_idx
@@ -436,311 +398,105 @@ class BacktestEngine:
         bars_scanned = len(df) - min_warmup
         logger.info(f"{symbol}: {len(trades)} işlem, {bars_scanned} bar tarandı")
 
-        # Rate limit
         time.sleep(0.5)
         return trades, bars_scanned
 
 
-# ==================== ADIM KONFİGÜRASYONLARI ====================
+# ==================== TRY PARİTE BULUCU ====================
 
-def make_step1_criteria() -> dict:
-    """
-    Adım 1: İzole Test — Sadece ADX + EMA + Hacim üçlüsü.
-    Diğer tüm kriterler devre dışı.
-    """
-    c = deepcopy(CRITERIA)
-
-    # Tüm kriterleri kapat
-    for name in c:
-        if isinstance(c[name], dict):
-            c[name]["enabled"] = False
-
-    # Sadece bu üçlüyü aç
-    c["market_regime"]["enabled"] = True   # ADX (market rejimi)
-    c["ema_cross"]["enabled"] = True       # EMA 9/21 crossover
-    c["ema_cross"]["weight"] = 2
-    c["volume_spike"]["enabled"] = True    # Hacim patlaması
-    c["volume_spike"]["weight"] = 2
-    c["trend_filter"]["enabled"] = True    # EMA 200 trend
-    c["trend_filter"]["weight"] = 2
-
-    # OCC'yi de aç ama required=False yap (izole test)
-    c["occ"]["enabled"] = True
-    c["occ"]["required"] = False
-    c["occ"]["weight"] = 2
-
-    # Filtreler kapalı
-    c["btc_filter"]["enabled"] = False
-    c["time_filter"]["enabled"] = False
-    c["multi_timeframe"]["enabled"] = False
-    c["confluence_window"]["enabled"] = False
-    c["candle_cooldown"]["enabled"] = False
-
-    return c
-
-
-def make_step2_criteria() -> dict:
-    """
-    Adım 2: Filtre Ekleme — Adım 1 + BTC Filtresi + Zaman Filtresi.
-    Amaç: Filtrelerin sinyal sayısını mı yoksa kârlılığı mı etkilediğini ölçmek.
-    """
-    c = make_step1_criteria()
-
-    # BTC ve zaman filtrelerini ekle
-    c["btc_filter"]["enabled"] = True
-    c["time_filter"]["enabled"] = True
-    c["time_filter"]["low_volume_penalty"] = True
-
-    return c
-
-
-def make_step3a_criteria() -> dict:
-    """
-    Adım 3a: 1H/4H Timeframe Uyumu.
-    Tam strateji + 1H ana TF, 4H üst TF.
-    Backtest için confluence window ve candle cooldown kapalı
-    (bu zamanlama filtreleri real-time'da anlamlı, backtest'te state sorunu yaratır).
-    """
-    c = deepcopy(CRITERIA)
-    c["multi_timeframe"]["enabled"] = True
-    c["multi_timeframe"]["higher_tf"] = "4h"
-    c["occ"]["required"] = False       # Backtest'te zorunlu kriter kaldır
-    c["confluence_window"]["enabled"] = False  # Bar-by-bar state sorunu
-    c["candle_cooldown"]["enabled"] = False     # Bar-by-bar state sorunu
-    return c
-
-
-def make_full_criteria() -> dict:
-    """Tam strateji (mevcut config, backtest uyumlu)."""
-    c = deepcopy(CRITERIA)
-    c["occ"]["required"] = False       # Backtest'te gevşet
-    c["confluence_window"]["enabled"] = False
-    c["candle_cooldown"]["enabled"] = False
-    return c
-
-
-# ==================== KARŞILAŞTIRMA RAPORU ====================
-
-def print_comparison(results: list):
-    """Birden fazla backtest sonucunu yan yana karşılaştırır."""
-    print(f"\n{'=' * 90}")
-    print(f"  KARŞILAŞTIRMA TABLOSU")
-    print(f"{'=' * 90}")
-
-    headers = ["Metrik"]
-    for r in results:
-        # Etiketi kısalt
-        short_label = r.label[:25] if len(r.label) > 25 else r.label
-        headers.append(short_label)
-
-    # Tablo formatı
-    col_w = max(28, max(len(h) + 2 for h in headers))
-    header_line = f"  {'Metrik':<28}"
-    for r in results:
-        short_label = r.label[:col_w - 2] if len(r.label) > col_w - 2 else r.label
-        header_line += f" | {short_label:>{col_w - 2}}"
-    print(header_line)
-    print(f"  {'─' * 28}" + (f" | {'─' * (col_w - 2)}" * len(results)))
-
-    metrics = [
-        ("Toplam İşlem", lambda r: f"{r.total_trades}"),
-        ("Win Rate (%)", lambda r: f"{r.win_rate:.1f}%"),
-        ("Toplam PnL (%)", lambda r: f"{r.total_pnl:+.2f}%"),
-        ("Beklenti/Trade (%)", lambda r: f"{r.expectancy:+.3f}%"),
-        ("Profit Factor", lambda r: f"{r.profit_factor:.2f}"),
-        ("Max Drawdown (%)", lambda r: f"{r.max_drawdown:.2f}%"),
-        ("Ort. Kazanç (%)", lambda r: f"{r.avg_win:+.2f}%"),
-        ("Ort. Kayıp (%)", lambda r: f"{r.avg_loss:+.2f}%"),
-        ("Ort. Süre (saat)", lambda r: f"{r.avg_duration_hours:.1f}"),
-    ]
-
-    for name, fn in metrics:
-        line = f"  {name:<28}"
-        for r in results:
-            line += f" | {fn(r):>{col_w - 2}}"
-        print(line)
-
-    print(f"{'─' * 90}")
-
-    # En iyi sonuç analizi
-    print(f"\n  📊 ANALİZ:")
-    best_pnl = max(results, key=lambda r: r.total_pnl)
-    best_wr = max(results, key=lambda r: r.win_rate)
-    best_pf = max(results, key=lambda r: r.profit_factor if r.profit_factor != float("inf") else 0)
-
-    print(f"  • En yüksek PnL         : {best_pnl.label} ({best_pnl.total_pnl:+.2f}%)")
-    print(f"  • En yüksek Win Rate    : {best_wr.label} ({best_wr.win_rate:.1f}%)")
-    print(f"  • En iyi Profit Factor  : {best_pf.label} ({best_pf.profit_factor:.2f})")
-
-    # Overfitting uyarısı
-    for r in results:
-        if r.win_rate > 70 and r.total_trades > 5:
-            print(f"\n  ⚠️  DİKKAT: '{r.label}' — Win rate %{r.win_rate:.0f} aşırı yüksek!")
-            print(f"     Bu muhtemelen overfitting veya yetersiz sample size göstergesidir.")
-            print(f"     Gerçekçi hedef: %55-%65 arası sürdürülebilir win rate.")
-
-    if any(r.total_trades < 20 for r in results):
-        print(f"\n  ⚠️  UYARI: Bazı testlerde işlem sayısı < 20.")
-        print(f"     İstatistiksel güvenilirlik için minimum 30+ işlem önerilir.")
-        print(f"     Daha fazla sembol veya daha uzun zaman aralığı kullanın.")
+def get_try_symbols(market: MarketData, max_symbols: int = 20) -> list:
+    """En yüksek hacimli TRY paritelerini seçer."""
+    all_pairs = market.get_all_pairs()
+    try_pairs = all_pairs["TRY"][:max_symbols * 2]
+    if not try_pairs:
+        try_pairs = [
+            "BTCTRY", "ETHTRY", "BNBTRY", "XRPTRY", "SOLTRY",
+            "AVXTRY", "DOGETRY", "ADATRY", "LINKTRY", "LTCTRY",
+        ]
+    filtered = market.filter_by_volume(try_pairs)
+    return filtered[:max_symbols]
 
 
 # ==================== ANA FONKSİYON ====================
 
-def get_test_symbols(market: MarketData, max_symbols: int = 20) -> list:
-    """En yüksek hacimli sembolleri seçer."""
-    all_pairs = market.get_all_pairs()
-    combined = all_pairs["USDT"][:max_symbols]  # USDT çiftleri genelde daha likit
-    if not combined:
-        combined = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
-    filtered = market.filter_by_volume(combined)
-    return filtered[:max_symbols]
-
-
-def run_step1(symbols: list, lookback: int) -> BacktestResult:
-    """Adım 1: ADX + EMA + Hacim izole testi."""
-    logger.info("=" * 60)
-    logger.info("ADIM 1: İzole Test — ADX + EMA + Hacim")
-    logger.info("=" * 60)
-
-    engine = BacktestEngine(
-        criteria_override=make_step1_criteria(),
-        min_strength_pct=0.60,  # İzole testte düşük eşik (daha az kriter var)
-        stop_loss_pct=2.5,
-        take_profit_pct=5.0,
-        max_hold_bars=48,
-    )
-    result = engine.run(symbols, label="Adım 1: ADX+EMA+Hacim (İzole)", lookback_bars=lookback)
-    result.print_summary()
-    return result
-
-
-def run_step2(symbols: list, lookback: int) -> BacktestResult:
-    """Adım 2: Adım 1 + BTC Filtre + Zaman Filtresi."""
-    logger.info("=" * 60)
-    logger.info("ADIM 2: Filtre Ekleme — ADX+EMA+Hacim + BTC + Zaman")
-    logger.info("=" * 60)
-
-    engine = BacktestEngine(
-        criteria_override=make_step2_criteria(),
-        min_strength_pct=0.60,
-        stop_loss_pct=2.5,
-        take_profit_pct=5.0,
-        max_hold_bars=48,
-    )
-    result = engine.run(symbols, label="Adım 2: +BTC/Zaman Filtre", lookback_bars=lookback)
-    result.print_summary()
-    return result
-
-
-def run_step3(symbols: list, lookback: int) -> BacktestResult:
-    """Adım 3: 1H/4H Timeframe Uyumu (Tam Strateji, bonus olarak MTF)."""
-    logger.info("=" * 60)
-    logger.info("ADIM 3: 1H/4H Timeframe Uyumu (Tam Strateji)")
-    logger.info("=" * 60)
-    logger.info("15M/1H backtest'te zarar etti (PF 0.92) → devre dışı")
-
-    engine = BacktestEngine(
-        criteria_override=make_step3a_criteria(),
-        min_strength_pct=0.65,
-        timeframe="1h",
-        stop_loss_pct=2.0,
-        take_profit_pct=4.0,
-        max_hold_bars=48,
-    )
-    result = engine.run(symbols, label="Adım 3: 1H/4H (Tam)", lookback_bars=lookback)
-    result.print_summary()
-    return result
-
-
-def run_full(symbols: list, lookback: int) -> BacktestResult:
-    """Mevcut tam strateji testi."""
-    logger.info("=" * 60)
-    logger.info("TAM STRATEJİ: Mevcut config aynen")
-    logger.info("=" * 60)
-
-    engine = BacktestEngine(
-        criteria_override=make_full_criteria(),
-        min_strength_pct=0.70,  # 12 puanlık sistemde ~9/12 = %75 → backtest'te %70
-        stop_loss_pct=2.0,
-        take_profit_pct=4.0,
-        max_hold_bars=48,
-    )
-    result = engine.run(symbols, label="Tam Strateji (Mevcut)", lookback_bars=lookback)
-    result.print_summary()
-    return result
-
-
 def main():
-    parser = argparse.ArgumentParser(description="BinanceTR Trade Scanner Backtester")
-    parser.add_argument("--step", type=int, choices=[1, 2, 3], default=0,
-                        help="Sadece belirli adımı çalıştır (1, 2 veya 3)")
+    parser = argparse.ArgumentParser(description="OCC Swing Trader Backtest")
     parser.add_argument("--symbol", type=str, default=None,
-                        help="Tek sembol testi (örn: BTCUSDT)")
-    parser.add_argument("--symbols", type=int, default=10,
-                        help="Test edilecek maksimum sembol sayısı (varsayılan: 10)")
+                        help="Tek sembol testi (örn: BTCTRY)")
+    parser.add_argument("--symbols", type=int, default=15,
+                        help="Test edilecek maksimum sembol sayısı (varsayılan: 15)")
     parser.add_argument("--bars", type=int, default=1000,
                         help="Geriye bakılacak bar sayısı (varsayılan: 1000)")
-    parser.add_argument("--full-only", action="store_true",
-                        help="Sadece mevcut tam stratejiyi test et")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Min sinyal gücü eşiği (0.0-1.0, varsayılan: config'den)")
     args = parser.parse_args()
 
     print(f"\n{'═' * 70}")
-    print(f"  🔬 BinanceTR Scanner Backtest v1.0")
+    print(f"  🎯 OCC Swing Trader Backtest")
     print(f"  📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"  📊 Strateji: OCC-merkezli | Sadece TRY | Max {MAX_HOLD_BARS//24} gün tutma")
     print(f"{'═' * 70}")
 
     market = MarketData()
 
-    # Sembol listesi
     if args.symbol:
         symbols = [args.symbol]
         print(f"  Sembol     : {args.symbol}")
     else:
-        symbols = get_test_symbols(market, max_symbols=args.symbols)
-        print(f"  Semboller  : {len(symbols)} adet")
+        symbols = get_try_symbols(market, max_symbols=args.symbols)
+        print(f"  Semboller  : {len(symbols)} TRY pariteleri")
 
+    min_pct = args.threshold or MIN_SIGNAL_STRENGTH_PCT
     print(f"  Lookback   : {args.bars} bar")
-    print(f"  Ana TF     : {KLINE_INTERVAL}")
+    print(f"  Timeframe  : {KLINE_INTERVAL}")
+    print(f"  Min Güç    : %{min_pct*100:.0f}")
+    print(f"  Max Tutma  : {MAX_HOLD_BARS} bar ({MAX_HOLD_BARS//24} gün)")
     print(f"{'═' * 70}")
 
     if not symbols:
-        print("❌ Test edilecek sembol bulunamadı!")
+        print("❌ Test edilecek TRY pariteleri bulunamadı!")
         return
 
-    results = []
+    print(f"\n  Pariteler: {', '.join(symbols)}")
 
-    if args.full_only:
-        result = run_full(symbols, args.bars)
-        results.append(result)
-    elif args.step == 1:
-        results.append(run_step1(symbols, args.bars))
-    elif args.step == 2:
-        results.append(run_step1(symbols, args.bars))
-        results.append(run_step2(symbols, args.bars))
-    elif args.step == 3:
-        results.append(run_step3(symbols, args.bars))
-    else:
-        # Tüm adımlar
-        results.append(run_step1(symbols, args.bars))
-        results.append(run_step2(symbols, args.bars))
-        results.append(run_step3(symbols, args.bars))
-        results.append(run_full(symbols, args.bars))
+    engine = BacktestEngine(
+        min_strength_pct=min_pct,
+        max_hold_bars=MAX_HOLD_BARS,
+    )
 
-    # Karşılaştırma tablosu
-    if len(results) > 1:
-        print_comparison(results)
+    result = engine.run(
+        symbols,
+        label="OCC Swing Trader (TRY, 1H, Max 7 Gün)",
+        lookback_bars=args.bars,
+    )
+    result.print_summary()
 
-    # Trade detayları (ilk 10)
-    for result in results:
-        if result.trades:
-            print(f"\n  📋 Son işlemler ({result.label}):")
-            for t in result.trades[-10:]:
-                status = "✅" if t.is_win else "❌"
-                print(f"    {status} {t.symbol} | {t.entry_time.strftime('%m/%d %H:%M')} → "
-                      f"{t.exit_time.strftime('%m/%d %H:%M') if t.exit_time else '?'} | "
-                      f"PnL: {t.pnl_pct:+.2f}% | {t.exit_reason} | "
-                      f"Güç: {t.signal_strength:.0%} | Rejim: {t.market_regime}")
+    # Trade detayları
+    if result.trades:
+        print(f"\n  📋 İşlem Detayları (son 15):")
+        for t in result.trades[-15:]:
+            status = "✅" if t.is_win else "❌"
+            duration_days = t.duration_hours / 24
+            print(f"    {status} {t.symbol} | "
+                  f"{t.entry_time.strftime('%m/%d %H:%M')} → "
+                  f"{t.exit_time.strftime('%m/%d %H:%M') if t.exit_time else '?'} | "
+                  f"PnL: {t.pnl_pct:+.2f}% | {t.exit_reason} | "
+                  f"Süre: {duration_days:.1f} gün | "
+                  f"Güç: {t.signal_strength:.0%} | Rejim: {t.market_regime}")
+
+        # Çıkış nedeni dağılımı
+        print(f"\n  📊 Çıkış Nedeni Dağılımı:")
+        reasons = {}
+        for t in result.trades:
+            if t.is_closed:
+                key = t.exit_reason.split("(")[0].strip()
+                if key not in reasons:
+                    reasons[key] = {"count": 0, "pnl": 0.0}
+                reasons[key]["count"] += 1
+                reasons[key]["pnl"] += t.pnl_pct
+        for reason, data in sorted(reasons.items(), key=lambda x: x[1]["count"], reverse=True):
+            avg_pnl = data["pnl"] / data["count"]
+            print(f"    {reason}: {data['count']} işlem, toplam PnL: {data['pnl']:+.2f}%, ort: {avg_pnl:+.2f}%")
 
     print(f"\n{'═' * 70}")
     print(f"  Backtest tamamlandı.")

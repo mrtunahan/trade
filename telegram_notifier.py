@@ -1,8 +1,8 @@
 # ============================================================================
-# telegram_notifier.py - Telegram Bildirim Modülü (Geliştirilmiş v2)
+# telegram_notifier.py - Telegram Bildirim Modülü (Manuel Trade v3)
 # ============================================================================
-# Bulunan sinyalleri Telegram'a zengin formatlı mesajlarla gönderir.
-# v2: Market rejimi, çıkış sinyali, gelişmiş modül bilgileri
+# OCC-merkezli swing trade sinyallerini Telegram'a gönderir.
+# Manuel trading için net giriş/SL/TP seviyeleri, TRY pariteleri.
 # ============================================================================
 
 import io
@@ -79,46 +79,50 @@ class TelegramNotifier:
 
     def send_signal(self, signal, chart_bytes: Optional[bytes] = None) -> bool:
         """
-        Sinyal bildirimini Telegram'a gönderir.
-        signal: analyzer.Signal nesnesi (ağırlıklı puanlama sistemi)
+        Manuel trade sinyalini Telegram'a gönderir.
+        Net giriş fiyatı, SL/TP seviyeleri ve pozisyon bilgisi.
         """
-        # Ağırlıklı güç yüzdesi
         strength_pct = signal.strength_pct
         if strength_pct >= 0.85:
             strength_emoji = "🔥🔥🔥"
             strength_text = "Full Sniper"
         elif strength_pct >= 0.70:
             strength_emoji = "🔥🔥"
-            strength_text = "High Probability"
+            strength_text = "Strong"
         else:
             strength_emoji = "🔥"
-            strength_text = "Güçlü"
+            strength_text = "Normal"
 
-        # Parite bilgisi
         quote = "TRY" if signal.symbol.endswith("TRY") else "USDT"
         base = signal.symbol.replace("TRY", "").replace("USDT", "")
 
-        # İndikatör değerleri
         rsi_val = signal.indicators.get("rsi")
         rsi_str = f"{float(rsi_val.iloc[-1]):.1f}" if rsi_val is not None and len(rsi_val) > 0 else "N/A"
 
         change_24h = signal.indicators.get("change_24h", 0)
         change_emoji = "📈" if change_24h >= 0 else "📉"
 
-        # Market rejimi bilgisi
         regime_map = {
-            "trending": "📊 Trend",
-            "ranging": "📐 Yatay",
-            "transition": "🔄 Geçiş",
-            "unknown": "❓ Belirsiz",
+            "trending": "Trend",
+            "ranging": "Yatay",
+            "transition": "Geçiş",
+            "unknown": "Belirsiz",
         }
         regime_text = regime_map.get(signal.market_regime, "")
 
-        # ADX bilgisi
         adx_val = signal.indicators.get("adx_last", float("nan"))
-        adx_str = f" (ADX: {adx_val:.1f})" if adx_val == adx_val else ""  # NaN check
+        adx_str = f" (ADX: {adx_val:.1f})" if adx_val == adx_val else ""
 
-        # Sağlanan kriterler listesi
+        # Fiyat ve seviyeler
+        price = signal.price
+        sl_pct = getattr(signal, "stop_loss_pct", 3.0)
+        tp_pct = getattr(signal, "take_profit_pct", 6.0)
+        sl_price = price * (1 - sl_pct / 100)
+        tp_price = price * (1 + tp_pct / 100)
+        pos_size = getattr(signal, "position_size_pct", 1.0)
+        pos_tier = getattr(signal, "position_tier", "")
+
+        # Sağlanan kriterler
         criteria_lines = []
         for name in signal.criteria_met:
             detail = signal.criteria_details.get(name, {})
@@ -126,7 +130,6 @@ class TelegramNotifier:
             weight = detail.get("weight", "?")
             criteria_lines.append(f"  ✅ <b>{self._format_criteria_name(name)}</b>: {desc} [{weight}p]")
 
-        # Sağlanmayan kriterleri de göster (kapalı olanları atlayarak)
         for name, detail in signal.criteria_details.items():
             if name not in signal.criteria_met:
                 desc = detail.get("description", name)
@@ -135,44 +138,37 @@ class TelegramNotifier:
 
         criteria_text = "\n".join(criteria_lines)
 
-        # Çıkış bilgisi
         exit_info = ""
         if signal.exit_score > 0:
             exit_info = f"\n⚠️ <b>Çıkış Puanı:</b> {signal.exit_score}/5\n"
 
-        # Ana mesaj
+        # Manuel trade için net mesaj
         message = (
             f"{strength_emoji} <b>ALIM SİNYALİ - {base}/{quote}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"\n"
-            f"💰 <b>Fiyat:</b> {signal.price:,.4f} {quote}\n"
-            f"📊 <b>Güç:</b> {strength_text} ({signal.strength}/{signal.total_criteria} puan — %{strength_pct*100:.0f})\n"
-            f"📉 <b>RSI:</b> {rsi_str}\n"
-            f"{change_emoji} <b>24s Değişim:</b> {change_24h:+.2f}%\n"
+            f"🎯 <b>Giriş:</b> {price:,.4f} {quote}\n"
+            f"🛑 <b>Stop-Loss:</b> {sl_price:,.4f} {quote} (-%{sl_pct:.1f})\n"
+            f"💰 <b>Hedef:</b> {tp_price:,.4f} {quote} (+%{tp_pct:.1f})\n"
+            f"📊 <b>R:R Oranı:</b> 1:{tp_pct/sl_pct:.1f}\n"
+            f"\n"
+            f"📊 <b>Güç:</b> {strength_text} ({signal.strength}/{signal.total_criteria} — %{strength_pct*100:.0f})\n"
+            f"💼 <b>Pozisyon:</b> %{pos_size*100:.0f}"
+        )
+        if pos_tier:
+            message += f" ({pos_tier})"
+
+        message += (
+            f"\n"
+            f"📉 <b>RSI:</b> {rsi_str} | "
+            f"{change_emoji} <b>24s:</b> {change_24h:+.2f}%\n"
         )
 
         if regime_text:
             message += f"🏷 <b>Piyasa:</b> {regime_text}{adx_str}\n"
 
-        # Pozisyon boyutu ve dinamik SL/TP
-        pos_size = getattr(signal, "position_size_pct", 1.0)
-        pos_tier = getattr(signal, "position_tier", "")
-        sl_pct = getattr(signal, "stop_loss_pct", 2.0)
-        tp_pct = getattr(signal, "take_profit_pct", 4.0)
-
         message += (
-            f"\n"
-            f"💼 <b>Pozisyon:</b> %{pos_size*100:.0f}"
-        )
-        if pos_tier:
-            message += f" ({pos_tier})"
-        message += (
-            f"\n"
-            f"🛑 <b>Stop-Loss:</b> %{sl_pct:.1f} | "
-            f"🎯 <b>Take-Profit:</b> %{tp_pct:.1f}\n"
-        )
-
-        message += (
+            f"⏱ <b>Max Tutma:</b> 7 gün\n"
             f"\n"
             f"<b>Kriterler:</b>\n"
             f"{criteria_text}\n"
@@ -183,7 +179,6 @@ class TelegramNotifier:
             f"🔗 <a href='https://www.tradingview.com/chart/?symbol=BINANCE:{signal.symbol}'>TradingView</a>"
         )
 
-        # Grafik varsa fotoğraf olarak, yoksa metin olarak gönder
         if chart_bytes and SEND_CHART_IMAGE:
             return self.send_photo(chart_bytes, caption=message)
         else:
@@ -286,15 +281,16 @@ class TelegramNotifier:
             modules_text = f"🧩 Gelişmiş modüller: {', '.join(active_modules)}\n"
 
         message = (
-            f"🤖 <b>Scanner Bot v2.0 Aktif!</b>\n"
+            f"🎯 <b>OCC Swing Trader Aktif!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"\n"
-            f"📊 Takip edilen parite: {pair_count}\n"
+            f"📊 Takip: {pair_count} TRY pariteleri\n"
             f"🎯 Min sinyal gücü: %{MIN_SIGNAL_STRENGTH_PCT*100:.0f}\n"
+            f"⏱ Max tutma: 7 gün\n"
             f"{modules_text}"
             f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"\n"
-            f"Sadece güçlü sinyaller bildirilecek..."
+            f"OCC tetiklemeli sinyaller bildirilecek..."
         )
         return self.send_message(message)
 
