@@ -218,7 +218,7 @@ class MultiTfOccAnalyzer:
 
             if tf == "15m":
                 # 15dk tetikleyici — puan vermez, sadece cross kontrolü
-                trigger_crossed = just_crossed and occ_status.is_green
+                trigger_crossed = occ_status.just_crossed and occ_status.is_green
             else:
                 max_score += weight
                 if occ_status.is_green:
