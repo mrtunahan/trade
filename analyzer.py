@@ -247,6 +247,13 @@ class TechnicalAnalyzer:
                     # Dinamik pozisyon boyutlandırma
                     pos_size, pos_tier = self._calculate_position_size(strength_pct)
 
+                    # 4H Confidence Multiplier: 4H uyumu varsa pozisyonu büyüt
+                    mtf_conf = self.criteria.get("multi_timeframe", {})
+                    if "multi_timeframe" in criteria_met and mtf_conf.get("confidence_multiplier"):
+                        multiplier = mtf_conf["confidence_multiplier"]
+                        pos_size = min(1.0, pos_size * multiplier)
+                        pos_tier += " +4H"
+
                     # Dinamik stop-loss / take-profit (ADX bazlı)
                     sl_pct, tp_pct = self._calculate_dynamic_sl_tp(indicators)
 

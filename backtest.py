@@ -24,7 +24,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from config import CRITERIA, KLINE_INTERVAL, KLINE_LIMIT, MIN_SIGNAL_STRENGTH_PCT
+from config import CRITERIA, KLINE_INTERVAL, KLINE_LIMIT, MIN_SIGNAL_STRENGTH_PCT, DYNAMIC_STOP_LOSS
 from market_data import MarketData
 from analyzer import TechnicalAnalyzer
 
@@ -314,10 +314,53 @@ class BacktestEngine:
                     active_trade = None
                     continue
 
-                # 2. Take-profit kontrolü (dinamik — ADX bazlı)
+                # 2. ATR Trailing Stop (sadece trending rejimde)
+                trail_cfg = DYNAMIC_STOP_LOSS.get("trailing_stop", {})
+                if (trail_cfg.get("enabled", False) and
+                        active_trade._regime in ("trending", "transition")):
+                    # Trailing high güncelle
+                    if current_high > active_trade._trailing_high:
+                        active_trade._trailing_high = current_high
+
+                    current_pnl_pct = ((current_high - entry_price) / entry_price) * 100
+                    activation = trail_cfg.get("activation_pct", 1.5)
+
+                    # Trailing aktive ol
+                    if current_pnl_pct >= activation:
+                        active_trade._trailing_active = True
+
+                    # Trailing aktifse, ATR bazlı stop hesapla
+                    if active_trade._trailing_active:
+                        atr_mult = trail_cfg.get("atr_multiplier", 2.0)
+                        # ATR hesapla (son 14 bar)
+                        if bar_idx >= 14:
+                            recent = df.iloc[bar_idx - 14:bar_idx + 1]
+                            tr_vals = pd.concat([
+                                recent["high"] - recent["low"],
+                                (recent["high"] - recent["close"].shift(1)).abs(),
+                                (recent["low"] - recent["close"].shift(1)).abs(),
+                            ], axis=1).max(axis=1)
+                            atr_val = float(tr_vals.mean())
+                        else:
+                            atr_val = entry_price * 0.02  # Fallback %2
+
+                        trail_stop = active_trade._trailing_high - (atr_val * atr_mult)
+
+                        if current_low <= trail_stop:
+                            pnl = ((trail_stop - entry_price) / entry_price) * 100 * active_trade._pos_size
+                            active_trade.exit_price = trail_stop
+                            active_trade.exit_time = current_time
+                            active_trade.exit_reason = f"Trailing Stop ({atr_mult}x ATR)"
+                            active_trade.pnl_pct = pnl
+                            active_trade.duration_hours = bars_held * self.TF_MINUTES.get(self.timeframe, 60) / 60
+                            trades.append(active_trade)
+                            active_trade = None
+                            continue
+
+                # 3. Take-profit kontrolü (dinamik — ADX bazlı, trailing yoksa)
                 tp_pct = active_trade._tp_pct
                 tp_price = entry_price * (1 + tp_pct / 100)
-                if current_high >= tp_price:
+                if current_high >= tp_price and not active_trade._trailing_active:
                     active_trade.exit_price = tp_price
                     active_trade.exit_time = current_time
                     active_trade.exit_reason = f"Take-Profit ({tp_pct:.1f}%)"
@@ -327,7 +370,7 @@ class BacktestEngine:
                     active_trade = None
                     continue
 
-                # 3. Exit strategy puanlaması
+                # 5. Exit strategy puanlaması
                 exit_sig = analyzer.check_exit_signal(symbol, window)
                 if exit_sig and exit_sig.exit_score >= 3:
                     pnl = ((current_close - entry_price) / entry_price) * 100 * active_trade._pos_size
@@ -340,7 +383,7 @@ class BacktestEngine:
                     active_trade = None
                     continue
 
-                # 4. Zaman bazlı timeout
+                # 6. Zaman bazlı timeout
                 if bars_held >= self.max_hold_bars:
                     pnl = ((current_close - entry_price) / entry_price) * 100 * active_trade._pos_size
                     active_trade.exit_price = current_close
@@ -372,6 +415,10 @@ class BacktestEngine:
                 trade._sl_pct = getattr(signal, "stop_loss_pct", self.stop_loss_pct)
                 trade._tp_pct = getattr(signal, "take_profit_pct", self.take_profit_pct)
                 trade._pos_size = getattr(signal, "position_size_pct", 1.0)
+                # Trailing stop state
+                trade._trailing_active = False
+                trade._trailing_high = current_close
+                trade._regime = signal.market_regime
                 active_trade = trade
 
         # Açık kalan pozisyonu kapat (son bar'da)
