@@ -123,18 +123,6 @@ class TechnicalAnalyzer:
                 # Cooldown geçtiyse sayacı artırmaya devam et
                 self._signal_candle_counts[symbol] = count + 1
 
-            # Zaman filtresi kontrolü
-            time_cfg = self.criteria.get("time_filter", {})
-            is_low_volume_session = False
-            if time_cfg.get("enabled", False):
-                is_low_volume_session = self._check_time_filter(df)
-
-            # BTC filtresi kontrolü
-            btc_cfg = self.criteria.get("btc_filter", {})
-            btc_bearish = False
-            if btc_cfg.get("enabled", False) and btc_df is not None:
-                btc_bearish = self._check_btc_filter(btc_df)
-
             # Her kriteri kontrol et
             criteria_met = []
             criteria_details = {}
@@ -175,10 +163,10 @@ class TechnicalAnalyzer:
                 criteria_details[name] = result
                 criteria_details[name]["weight"] = weight
 
-            # Multi-Timeframe doğrulama
+            # Multi-Timeframe doğrulama (bonus puan)
             mtf_cfg = self.criteria.get("multi_timeframe", {})
             if mtf_cfg.get("enabled", False):
-                mtf_weight = mtf_cfg.get("weight", 2)
+                mtf_weight = mtf_cfg.get("weight", 1)
                 total_weight += mtf_weight
                 mtf_result = self._check_multi_timeframe(htf_df, indicators)
                 if mtf_result["met"]:
@@ -187,12 +175,47 @@ class TechnicalAnalyzer:
                 criteria_details["multi_timeframe"] = mtf_result
                 criteria_details["multi_timeframe"]["weight"] = mtf_weight
 
+            # Zaman filtresi (yumuşak bonus puan)
+            time_cfg = self.criteria.get("time_filter", {})
+            if time_cfg.get("enabled", False):
+                time_weight = time_cfg.get("weight", 1)
+                total_weight += time_weight
+                is_high_volume = not self._check_time_filter(df)  # True = yüksek hacim saati
+                time_result = {
+                    "met": is_high_volume,
+                    "detail": f"Seans: {'Yüksek hacim' if is_high_volume else 'Düşük hacim'}",
+                    "description": "Yüksek hacimli seans" if is_high_volume else "Düşük hacimli seans",
+                }
+                if is_high_volume:
+                    criteria_met.append("time_filter")
+                    earned_weight += time_weight
+                criteria_details["time_filter"] = time_result
+                criteria_details["time_filter"]["weight"] = time_weight
+
+            # BTC filtresi (yumuşak bonus puan)
+            btc_cfg = self.criteria.get("btc_filter", {})
+            if btc_cfg.get("enabled", False):
+                btc_weight = btc_cfg.get("weight", 1)
+                total_weight += btc_weight
+                btc_bullish = False
+                if btc_df is not None:
+                    btc_bearish = self._check_btc_filter(btc_df)
+                    btc_bullish = not btc_bearish
+                btc_result = {
+                    "met": btc_bullish,
+                    "detail": f"BTC: {'Yükseliş' if btc_bullish else 'Düşüş/Veri yok'}",
+                    "description": "BTC yükseliş trendi" if btc_bullish else "BTC düşüş/belirsiz",
+                }
+                if btc_bullish:
+                    criteria_met.append("btc_filter")
+                    earned_weight += btc_weight
+                criteria_details["btc_filter"] = btc_result
+                criteria_details["btc_filter"]["weight"] = btc_weight
+
             # Zorunlu kriter kontrolü: OCC (veya required=True olan herhangi bir kriter)
             for name, cfg in self.criteria.items():
                 if cfg.get("enabled", False) and cfg.get("required", False):
                     if name not in criteria_met:
-                        # Zorunlu kriter sağlanmadıysa sinyal üretme
-                        # Ama confluence window'u güncelle
                         self._update_confluence_state(symbol, name, criteria_met)
                         return None
 
@@ -205,16 +228,8 @@ class TechnicalAnalyzer:
             # Ağırlıklı güç yüzdesi
             strength_pct = earned_weight / total_weight if total_weight > 0 else 0.0
 
-            # Düşük hacimli saatlerde eşiği yükselt
+            # Eşik (artık sert filtre yok, sadece min_strength_pct)
             effective_threshold = self.min_strength_pct
-            if is_low_volume_session and time_cfg.get("low_volume_penalty", False):
-                effective_threshold = min(0.95, MIN_SIGNAL_STRENGTH_PCT + 0.05)
-                logger.debug(f"{symbol}: Düşük hacim saati, eşik %{effective_threshold*100:.0f}'e yükseltildi")
-
-            # BTC düşüş filtresi: altcoinlerde eşiği yükselt
-            if btc_bearish and not symbol.startswith("BTC"):
-                effective_threshold = min(0.95, effective_threshold + 0.05)
-                logger.debug(f"{symbol}: BTC düşüşte, altcoin eşiği %{effective_threshold*100:.0f}'e yükseltildi")
 
             # Çıkış stratejisi puanlaması
             exit_score, exit_details = self._calculate_exit_score(df, indicators)
