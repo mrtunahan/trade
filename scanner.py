@@ -29,6 +29,7 @@ from config import (
     SEND_CHART_IMAGE,
     MIN_SIGNAL_STRENGTH_PCT,
     CRITERIA,
+    ONLY_TRY,
 )
 from market_data import MarketData
 from analyzer import TechnicalAnalyzer
@@ -116,7 +117,11 @@ class Scanner:
 
         logger.info("Parite listesi güncelleniyor...")
         all_pairs = self.market.get_all_pairs()
-        combined = all_pairs["TRY"] + all_pairs["USDT"]
+
+        if ONLY_TRY:
+            combined = all_pairs["TRY"]
+        else:
+            combined = all_pairs["TRY"] + all_pairs["USDT"]
 
         # Hacim filtresi
         self.pairs = self.market.filter_by_volume(combined)
