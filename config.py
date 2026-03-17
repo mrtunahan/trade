@@ -150,27 +150,29 @@ CRITERIA = {
 
     # --- Multi-Timeframe Doğrulama ---
     # Bir üst zaman diliminde trend yönü doğrulaması
-    # Örn: 1H'de OCC Long geldiğinde, 4H'de de trendin yukarı olması
+    # Bonus puan olarak çalışır, yokluğu sinyal iptali yapmaz
     "multi_timeframe": {
         "enabled": True,
         "higher_tf": "4h",         # Üst zaman dilimi (1h → 4h, 15m → 1h)
-        "weight": 2,               # Önemli doğrulama → 2 puan
+        "weight": 1,               # Bonus puan (2'den 1'e düşürüldü)
     },
 
     # --- Zaman Filtresi (Seans Bazlı) ---
-    # Düşük hacimli saatlerde sinyal kalitesi düşer
+    # Yumuşak filtre: düşük hacimli saatlerde eşik yükseltme yerine
+    # bonus puan olarak çalışır (seans içi = +1 puan)
     "time_filter": {
         "enabled": True,
         "high_volume_hours_utc": [(13, 21)],   # Avrupa+Amerika örtüşmesi (UTC)
-        "low_volume_penalty": True,             # Düşük hacim saatlerinde eşiği yükselt
-        "weight": 0,                            # Puan vermez, filtre olarak çalışır
+        "low_volume_penalty": False,            # Sert eşik cezası KAPALI
+        "weight": 1,                            # Yüksek hacim saati = +1 bonus puan
     },
 
-    # --- BTC Dominans Filtresi ---
-    # BTC düşüşte/dominans yükselişte iken altcoin long sinyallerini baskıla
+    # --- BTC Filtresi ---
+    # Yumuşak filtre: BTC yükselişte ise +1 bonus puan
+    # BTC düşüşte ise puan vermez ama sinyal iptal etmez
     "btc_filter": {
         "enabled": True,
-        "weight": 0,               # Puan vermez, filtre/eşik ayarlayıcı olarak çalışır
+        "weight": 1,               # BTC yükselişte = +1 bonus puan
     },
 
     # --- Confluence Window (Sinyal Çakışma Penceresi) ---
@@ -200,13 +202,15 @@ CRITERIA = {
 }
 
 # ==================== AĞIRLIKLI PUANLAMA ====================
-# Toplam ağırlık: OCC(2) + Trend(2) + EMA(1) + RSI(1) + MACD(1) + Bollinger(1) + Hacim(1) + StochRSI(1) + MTF(2) = 12
-# %90 eşik = minimum ~11 puan gerekli
-# Bu, neredeyse tüm kriterlerin sağlanmasını gerektirir.
+# Toplam ağırlık: OCC(2) + Trend(2) + EMA(1) + RSI(1) + MACD(1) + Bollinger(1)
+#                + Hacim(1) + StochRSI(1) + MTF(1) + Zaman(1) + BTC(1) = 13
+# %70 eşik = minimum ~9/13 puan gerekli
+# Çekirdek kriterler (ADX+EMA+Hacim) + birkaç doğrulama yeterli.
+# Backtest sonucu: %90 eşik pratikte sinyal üretmiyor, %70 sürdürülebilir.
 
 # Minimum ağırlıklı puan yüzdesi (0.0 - 1.0)
 # Sadece bu eşiğin üstündeki sinyaller Telegram'a gönderilir
-MIN_SIGNAL_STRENGTH_PCT = 0.90  # %90 — sadece çok güçlü sinyaller
+MIN_SIGNAL_STRENGTH_PCT = 0.70  # %70 — ADX+EMA+Hacim bazlı, filtreler bonus
 
 # Eski MIN_CRITERIA_MET artık ağırlıklı sistemde kullanılmıyor ama
 # analyzer.py'de geriye uyumluluk için tutuluyor (3 olarak).

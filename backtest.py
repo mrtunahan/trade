@@ -655,8 +655,8 @@ def main():
                         help="Tek sembol testi (örn: BTCUSDT)")
     parser.add_argument("--symbols", type=int, default=10,
                         help="Test edilecek maksimum sembol sayısı (varsayılan: 10)")
-    parser.add_argument("--bars", type=int, default=500,
-                        help="Geriye bakılacak bar sayısı (varsayılan: 500)")
+    parser.add_argument("--bars", type=int, default=1000,
+                        help="Geriye bakılacak bar sayısı (varsayılan: 1000)")
     parser.add_argument("--full-only", action="store_true",
                         help="Sadece mevcut tam stratejiyi test et")
     args = parser.parse_args()
