@@ -127,14 +127,14 @@ CRITERIA = {
     # Close MA ve Open MA kesişimine dayalı sinyal.
     # JustUncleL'ın OCC Alert R6.2 indikatöründen esinlenilmiştir.
     # Non-repaint: Sadece kapanmış mumlara bakılır.
-    # ZORUNLU KRİTER: OCC sağlanmadan sinyal üretilmez.
+    # Yumuşak filtre: +2 bonus puan, zorunlu değil.
     "occ": {
         "enabled": True,
         "period": 5,
         "ma_type": "EMA",
         "min_strength": 0.01,
         "weight": 2,              # Ana sinyal üreticisi → 2 puan
-        "required": True,         # ZORUNLU: OCC olmadan sinyal üretilmez
+        "required": False,        # YUMUŞAK: OCC bonus filtre, zorunlu değil
     },
 
     # --- Market Rejimi (ADX Bazlı) ---
@@ -149,12 +149,14 @@ CRITERIA = {
     },
 
     # --- Multi-Timeframe Doğrulama ---
-    # Bir üst zaman diliminde trend yönü doğrulaması
-    # Bonus puan olarak çalışır, yokluğu sinyal iptali yapmaz
+    # 4H uyumu = pozisyon boyutu çarpanı (confidence multiplier)
+    # Varsa +%50 pozisyon büyüklüğü, yoksa normal pozisyonla devam
+    # Puanlama: +1 bonus puan + pozisyon çarpanı
     "multi_timeframe": {
         "enabled": True,
-        "higher_tf": "4h",         # Üst zaman dilimi (1h → 4h, 15m → 1h)
-        "weight": 1,               # Bonus puan (2'den 1'e düşürüldü)
+        "higher_tf": "4h",         # Üst zaman dilimi (1h → 4h)
+        "weight": 1,               # +1 bonus puan
+        "confidence_multiplier": 1.5,  # 4H onayı varsa pozisyon %50 büyüt
     },
 
     # --- Zaman Filtresi (Seans Bazlı) ---
@@ -202,11 +204,14 @@ CRITERIA = {
 }
 
 # ==================== AĞIRLIKLI PUANLAMA ====================
-# Toplam ağırlık: OCC(2) + Trend(2) + EMA(1) + RSI(1) + MACD(1) + Bollinger(1)
-#                + Hacim(1) + StochRSI(1) + MTF(1) + Zaman(1) + BTC(1) = 13
-# %70 eşik = minimum ~9/13 puan gerekli
-# Çekirdek kriterler (ADX+EMA+Hacim) + birkaç doğrulama yeterli.
-# Backtest sonucu: %90 eşik pratikte sinyal üretmiyor, %70 sürdürülebilir.
+# Katman 1 — Temel (Adım 2 bazlı):
+#   Trend(2) + EMA(1) + Hacim(1) + RSI(1) + MACD(1) + Bollinger(1) + StochRSI(1) = 8
+# Katman 2 — Yumuşak filtre (bonus):
+#   OCC(2) + BTC(1) + Zaman(1) = 4
+# Katman 3 — Confidence (pozisyon çarpanı):
+#   MTF/4H(1) = 1 puan + varsa pozisyon %50 büyüt
+# Toplam: 13 puan, %70 eşik = ~9/13
+# Backtest: Adım 2 (PF 1.60, +150% PnL) temel strateji.
 
 # Minimum ağırlıklı puan yüzdesi (0.0 - 1.0)
 # Sadece bu eşiğin üstündeki sinyaller Telegram'a gönderilir
@@ -231,9 +236,9 @@ POSITION_SIZING = {
 }
 
 # ==================== DİNAMİK STOP-LOSS ====================
-# ADX bazlı adaptif stop-loss.
-# Trend piyasada: geniş SL (trend devamı için alan ver)
-# Yatay piyasada: dar SL (hızlı kes, kayıpları sınırla)
+# ADX bazlı adaptif stop-loss + ATR trailing stop.
+# Trend piyasada: geniş SL + trailing stop (kârı koştur)
+# Yatay piyasada: dar SL + sabit TP (hızlı kes)
 DYNAMIC_STOP_LOSS = {
     "enabled": True,
     "base_sl_pct": 2.0,           # Varsayılan stop-loss %2
@@ -241,9 +246,15 @@ DYNAMIC_STOP_LOSS = {
     "strong_trend_adx": 40,       # ADX > 40 → güçlü trend
     "ranging_adx": 20,            # ADX < 20 → yatay piyasa
     "trend_sl_pct": 3.0,          # Güçlü trend → SL %3 (geniş, alan ver)
-    "trend_tp_pct": 6.0,          # Güçlü trend → TP %6 (trendi kov)
+    "trend_tp_pct": 8.0,          # Güçlü trend → TP %8 (trendi kov, trailing ile daha fazla)
     "range_sl_pct": 1.5,          # Yatay piyasa → SL %1.5 (dar, hızlı kes)
     "range_tp_pct": 3.0,          # Yatay piyasa → TP %3 (mütevazı hedef)
+    # ATR Trailing Stop (sadece trending rejimde)
+    "trailing_stop": {
+        "enabled": True,
+        "atr_multiplier": 2.0,    # Trailing stop = 2x ATR
+        "activation_pct": 1.5,    # %1.5 kâra geçince trailing başlar
+    },
 }
 
 # ==================== BİLDİRİM AYARLARI ====================
