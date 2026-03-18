@@ -19,7 +19,7 @@ import pandas as pd
 
 from config import (
     OCC_TIMEFRAMES, OCC_MIN_SCORE, OCC_PERIOD, OCC_MA_TYPE, OCC_MIN_STRENGTH,
-    RSI_CONFIG, ADX_CONFIG, DYNAMIC_STOP_LOSS,
+    RSI_CONFIG, ADX_CONFIG, DYNAMIC_STOP_LOSS, SIGNAL_FILTER,
 )
 
 logger = logging.getLogger("Analyzer")
@@ -145,10 +145,49 @@ class MultiTfSignal:
 
     @property
     def is_valid_entry(self) -> bool:
-        """Giriş sinyali geçerli mi?"""
-        return (self.total_score >= OCC_MIN_SCORE and
-                self.trigger_crossed and
-                self.rsi_quality != "blocked")
+        """
+        Giriş sinyali geçerli mi?
+
+        Yeni filtre kuralları:
+        1. Belirli OCC dizilimi (ör: 1w🟢 1d🟢 4h🔴 1h🔴 15m🟢) + ADX > 25 + RSI >= 50
+        2. Full Sniper (puan >= 7) + ADX > 25 + RSI >= 50
+        """
+        # Temel koşullar: 15dk tetikleyici yeşil olmalı
+        if not self.trigger_crossed:
+            return False
+
+        cfg = SIGNAL_FILTER
+        if not cfg.get("enabled", False):
+            # Filtre kapalıysa eski davranış
+            return (self.total_score >= OCC_MIN_SCORE and
+                    self.rsi_quality != "blocked")
+
+        # ADX ve RSI filtreleri
+        min_adx = cfg.get("min_adx", 25)
+        min_rsi = cfg.get("min_rsi", 50)
+
+        if math.isnan(self.adx_value) or self.adx_value <= min_adx:
+            return False
+        if math.isnan(self.rsi_value) or self.rsi_value < min_rsi:
+            return False
+
+        # OCC dizilimini çıkar: {timeframe: is_green}
+        current_pattern = {s.timeframe: s.is_green for s in self.tf_statuses}
+
+        # Kural 1: Full Sniper (tüm üst TF'ler yeşil)
+        if cfg.get("allow_full_sniper", True):
+            sniper_score = cfg.get("full_sniper_min_score", 7)
+            if self.total_score >= sniper_score:
+                return True
+
+        # Kural 2: İzin verilen OCC dizilimlerinden biriyle eşleşme
+        for allowed in cfg.get("allowed_patterns", []):
+            pattern = allowed.get("pattern", {})
+            if all(current_pattern.get(tf) == expected
+                   for tf, expected in pattern.items()):
+                return True
+
+        return False
 
     @property
     def score_pct(self) -> float:

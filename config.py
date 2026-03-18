@@ -72,6 +72,35 @@ OCC_TIMEFRAMES = {
 # Minimum eşik: 5 puan (üst TF'lerin çoğunluğu yeşil olmalı)
 OCC_MIN_SCORE = 5
 
+# ==================== SİNYAL FİLTRE KURALLARI ====================
+# Yalnızca bu koşullardan birini sağlayan coinler için bildirim gönderilir.
+#
+# Kural 1: Belirli OCC dizilimi + ADX/RSI filtresi
+#   OCC pattern: 1w=green, 1d=green, 4h=red, 1h=red, 15m=green
+#   ADX > 25 ve RSI >= 50
+#
+# Kural 2: Full Sniper (tüm TF'ler yeşil, puan >= 7) + ADX/RSI filtresi
+#   ADX > 25 ve RSI >= 50
+
+SIGNAL_FILTER = {
+    "enabled": True,
+    "min_adx": 25,        # ADX bu değerin üstünde olmalı
+    "min_rsi": 50,        # RSI bu değerin üstünde veya eşit olmalı
+
+    # İzin verilen OCC dizilimleri (pattern match)
+    # Her pattern: {timeframe: True=green, False=red}
+    "allowed_patterns": [
+        {
+            "name": "Dip Avcısı",
+            "pattern": {"1w": True, "1d": True, "4h": False, "1h": False, "15m": True},
+        },
+    ],
+
+    # Full Sniper (puan >= 7) her zaman izin verilir (ADX/RSI filtresi ile)
+    "allow_full_sniper": True,
+    "full_sniper_min_score": 7,
+}
+
 # OCC hesaplama parametreleri (tüm TF'ler için aynı)
 OCC_PERIOD = 8           # Pine Script varsayılanı: 8 (basisLen)
 OCC_MA_TYPE = "SMMA"     # Pine Script varsayılanı: SMMA (Smoothed MA)
