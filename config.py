@@ -73,9 +73,9 @@ OCC_TIMEFRAMES = {
 OCC_MIN_SCORE = 5
 
 # OCC hesaplama parametreleri (tüm TF'ler için aynı)
-OCC_PERIOD = 5
-OCC_MA_TYPE = "EMA"
-OCC_MIN_STRENGTH = 0.01  # Minimum cross strength
+OCC_PERIOD = 8           # Pine Script varsayılanı: 8 (basisLen)
+OCC_MA_TYPE = "SMMA"     # Pine Script varsayılanı: SMMA (Smoothed MA)
+OCC_MIN_STRENGTH = 5.0   # Pine Script pcd skalası (50000*diff/avg)
 
 # ==================== RSI FİLTRESİ ====================
 # RSI giriş kalitesini artırmak için kullanılır.

@@ -33,7 +33,11 @@ def _safe_float(series, index=-1, default=float("nan")) -> float:
         return default
 
 
-def _calc_ma(series: pd.Series, period: int, ma_type: str = "EMA") -> pd.Series:
+def _calc_ma(series: pd.Series, period: int, ma_type: str = "SMMA") -> pd.Series:
+    """
+    Pine Script OCC indikatöründeki tüm MA tiplerini destekler.
+    Orijinal indikatörün varsayılanı: SMMA, periyot 8.
+    """
     ma_type = ma_type.upper()
     if ma_type == "SMA":
         return series.rolling(period).mean()
@@ -48,8 +52,54 @@ def _calc_ma(series: pd.Series, period: int, ma_type: str = "EMA") -> pd.Series:
         ema2 = ema1.ewm(span=period, adjust=False).mean()
         ema3 = ema2.ewm(span=period, adjust=False).mean()
         return 3 * ema1 - 3 * ema2 + ema3
+    elif ma_type == "WMA":
+        weights = np.arange(1, period + 1, dtype=float)
+        return series.rolling(period).apply(
+            lambda x: np.dot(x, weights) / weights.sum(), raw=True
+        )
+    elif ma_type == "SMMA" or ma_type == "RMA":
+        # Pine Script: v7 := na(v7[1]) ? sma(src, len) : (v7[1] * (len - 1) + src) / len
+        # Bu, alpha=1/period olan EWM ile eşdeğerdir
+        return series.ewm(alpha=1.0 / period, adjust=False).mean()
+    elif ma_type == "HULLMA":
+        half_len = int(period / 2)
+        sqrt_len = int(round(np.sqrt(period)))
+        wma_half = series.rolling(half_len).apply(
+            lambda x: np.dot(x, np.arange(1, half_len + 1, dtype=float)) / np.arange(1, half_len + 1).sum(), raw=True
+        )
+        wma_full = series.rolling(period).apply(
+            lambda x: np.dot(x, np.arange(1, period + 1, dtype=float)) / np.arange(1, period + 1).sum(), raw=True
+        )
+        hull_src = 2 * wma_half - wma_full
+        return hull_src.rolling(sqrt_len).apply(
+            lambda x: np.dot(x, np.arange(1, sqrt_len + 1, dtype=float)) / np.arange(1, sqrt_len + 1).sum(), raw=True
+        )
+    elif ma_type == "LSMA":
+        return series.rolling(period).apply(
+            lambda x: np.polyval(np.polyfit(np.arange(period), x, 1), period - 1), raw=True
+        )
+    elif ma_type == "TMA":
+        # Triangular MA = SMA of SMA
+        sma1 = series.rolling(period).mean()
+        return sma1.rolling(period).mean()
+    elif ma_type == "SSMA":
+        # SuperSmoother filter (John Ehlers)
+        a1 = np.exp(-1.414 * np.pi / period)
+        b1 = 2 * a1 * np.cos(1.414 * np.pi / period)
+        c2 = b1
+        c3 = -a1 * a1
+        c1 = 1 - c2 - c3
+        result = series.copy().astype(float)
+        vals = series.values.astype(float)
+        res = np.empty_like(vals)
+        res[0] = vals[0]
+        res[1] = vals[1] if len(vals) > 1 else vals[0]
+        for i in range(2, len(vals)):
+            res[i] = c1 * (vals[i] + vals[i - 1]) / 2 + c2 * res[i - 1] + c3 * res[i - 2]
+        return pd.Series(res, index=series.index)
     else:
-        return series.ewm(span=period, adjust=False).mean()
+        # Varsayılan: SMMA (orijinal Pine Script varsayılanı)
+        return series.ewm(alpha=1.0 / period, adjust=False).mean()
 
 
 # ==================== OCC TF DURUMU ====================
@@ -359,9 +409,9 @@ class MultiTfOccAnalyzer:
             was_green = c_prev > o_prev
             just_crossed = is_green != was_green
 
-        # Strength: fark yüzdesi
-        mid = (c_now + o_now) / 2 if (c_now + o_now) != 0 else 1
-        strength = ((c_now - o_now) / mid) * 100
+        # Strength: Pine Script formülü: pcd = 50000 * diff / closeOpenAvg
+        avg = (c_now + o_now) / 2 if (c_now + o_now) != 0 else 1
+        strength = 50000.0 * (c_now - o_now) / avg
 
         return OccTfStatus(
             timeframe=tf, label="", weight=0,
