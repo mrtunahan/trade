@@ -148,46 +148,105 @@ class MultiTfSignal:
         """
         Giriş sinyali geçerli mi?
 
-        Yeni filtre kuralları:
-        1. Belirli OCC dizilimi (ör: 1w🟢 1d🟢 4h🔴 1h🔴 15m🟢) + ADX > 25 + RSI >= 50
-        2. Full Sniper (puan >= 7) + ADX > 25 + RSI >= 50
+        Desen bazlı dinamik eşik sistemi:
+        1. Tanımlı desenlerden biri eşleşirse → o desenin ADX/RSI eşikleri
+        2. Full Sniper (puan >= 7) → kendi ADX/RSI eşikleri
+        3. Puan >= 6 + üst TF koruması → genel eşikler (score_fallback)
         """
         # Temel koşullar: 15dk tetikleyici yeşil olmalı
         if not self.trigger_crossed:
             return False
 
+        # Minimum puan kontrolü
+        if self.total_score < OCC_MIN_SCORE:
+            return False
+
         cfg = SIGNAL_FILTER
         if not cfg.get("enabled", False):
             # Filtre kapalıysa eski davranış
-            return (self.total_score >= OCC_MIN_SCORE and
-                    self.rsi_quality != "blocked")
+            return self.rsi_quality != "blocked"
 
-        # ADX ve RSI filtreleri
-        min_adx = cfg.get("min_adx", 25)
-        min_rsi = cfg.get("min_rsi", 50)
-
-        if math.isnan(self.adx_value) or self.adx_value <= min_adx:
+        # RSI blocked ise her durumda engelle (>= 80)
+        if self.rsi_quality == "blocked":
             return False
-        if math.isnan(self.rsi_value) or self.rsi_value < min_rsi:
+
+        # ADX veya RSI hesaplanamadıysa geçirme
+        if math.isnan(self.adx_value) or math.isnan(self.rsi_value):
             return False
 
         # OCC dizilimini çıkar: {timeframe: is_green}
         current_pattern = {s.timeframe: s.is_green for s in self.tf_statuses}
 
-        # Kural 1: Full Sniper (tüm üst TF'ler yeşil)
-        if cfg.get("allow_full_sniper", True):
-            sniper_score = cfg.get("full_sniper_min_score", 7)
-            if self.total_score >= sniper_score:
-                return True
-
-        # Kural 2: İzin verilen OCC dizilimlerinden biriyle eşleşme
+        # ---- Kural 1: Tanımlı desen eşleşmesi (desen bazlı eşikler) ----
         for allowed in cfg.get("allowed_patterns", []):
             pattern = allowed.get("pattern", {})
             if all(current_pattern.get(tf) == expected
                    for tf, expected in pattern.items()):
-                return True
+                # Bu desen eşleşti — desenin kendi eşiklerini kullan
+                min_adx = allowed.get("min_adx", 20)
+                max_adx = allowed.get("max_adx", 100)
+                min_rsi = allowed.get("min_rsi", 35)
+                if self.adx_value > min_adx and self.adx_value <= max_adx and self.rsi_value >= min_rsi:
+                    self._matched_pattern = allowed.get("name", "Desen")
+                    return True
+                return False  # Desen eşleşti ama eşikler tutmadı
+
+        # ---- Kural 2: Full Sniper (tüm üst TF'ler yeşil) ----
+        if cfg.get("allow_full_sniper", True):
+            sniper_score = cfg.get("full_sniper_min_score", 7)
+            if self.total_score >= sniper_score:
+                min_adx = cfg.get("full_sniper_min_adx", 22)
+                min_rsi = cfg.get("full_sniper_min_rsi", 45)
+                if self.adx_value > min_adx and self.rsi_value >= min_rsi:
+                    self._matched_pattern = "Full Sniper"
+                    return True
+
+        # ---- Kural 3: Puan bazlı geçiş (score_fallback) ----
+        fallback = cfg.get("score_fallback", {})
+        if fallback.get("enabled", False):
+            fb_min_score = fallback.get("min_score", 6)
+            if self.total_score >= fb_min_score:
+                # Üst TF koruması: 1w veya 1d'den en az biri yeşil olmalı
+                if fallback.get("require_upper_tf", True):
+                    has_upper = current_pattern.get("1w", False) or current_pattern.get("1d", False)
+                    if not has_upper:
+                        return False
+                min_adx = fallback.get("min_adx", 22)
+                min_rsi = fallback.get("min_rsi", 45)
+                if self.adx_value > min_adx and self.rsi_value >= min_rsi:
+                    self._matched_pattern = "Puan Geçişi"
+                    return True
 
         return False
+
+    @property
+    def matched_pattern_name(self) -> str:
+        """Eşleşen desen adını döndürür."""
+        return getattr(self, "_matched_pattern", "")
+
+    @property
+    def signal_star_rating(self) -> dict:
+        """
+        Yıldız bazlı kalite sistemi.
+        Returns: {"stars": "⭐⭐", "label": "Güçlü Sinyal", "position_pct": 75}
+        """
+        cfg = SIGNAL_FILTER.get("star_rating", {})
+        if not cfg.get("enabled", False):
+            # Eski davranış
+            if self.total_score >= 7:
+                return {"stars": "⭐⭐⭐", "label": "Full Sniper", "position_pct": 100}
+            elif self.total_score >= 5:
+                return {"stars": "⭐⭐", "label": "Güçlü Sinyal", "position_pct": 75}
+            return {"stars": "⭐", "label": "Fırsat", "position_pct": 50}
+
+        for tier in cfg.get("tiers", []):
+            if self.total_score >= tier["min_score"]:
+                return {
+                    "stars": tier["stars"],
+                    "label": tier["label"],
+                    "position_pct": tier["position_pct"],
+                }
+        return {"stars": "⭐", "label": "Fırsat", "position_pct": 50}
 
     @property
     def score_pct(self) -> float:
@@ -232,19 +291,13 @@ class MultiTfSignal:
 
     @property
     def position_size_pct(self):
-        if self.total_score >= 7:
-            return 1.0
-        elif self.total_score >= 5:
-            return 0.75
-        return 0.50
+        rating = self.signal_star_rating
+        return rating["position_pct"] / 100.0
 
     @property
     def position_tier(self):
-        if self.total_score >= 7:
-            return "Full Sniper"
-        elif self.total_score >= 5:
-            return "Strong"
-        return "Normal"
+        rating = self.signal_star_rating
+        return rating["label"]
 
 
 # ==================== ANA ANALİZ MOTORU ====================

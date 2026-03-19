@@ -73,32 +73,83 @@ OCC_TIMEFRAMES = {
 OCC_MIN_SCORE = 5
 
 # ==================== SİNYAL FİLTRE KURALLARI ====================
-# Yalnızca bu koşullardan birini sağlayan coinler için bildirim gönderilir.
+# Desen bazlı dinamik eşik sistemi:
+# Her desen kendi ADX/RSI eşiklerine sahiptir.
 #
-# Kural 1: Belirli OCC dizilimi + ADX/RSI filtresi
-#   OCC pattern: 1w=green, 1d=green, 4h=red, 1h=red, 15m=green
-#   ADX > 25 ve RSI >= 50
+# Kural 1: Tanımlı desenlere eşleşen coinler → desen bazlı ADX/RSI filtresi
+# Kural 2: Full Sniper (puan >= 7) → kendi ADX/RSI eşikleri
+# Kural 3: Puan >= 6 + üst TF koruması (1w veya 1d yeşil) → genel eşikler
 #
-# Kural 2: Full Sniper (tüm TF'ler yeşil, puan >= 7) + ADX/RSI filtresi
-#   ADX > 25 ve RSI >= 50
+# Yıldızlama sistemi: Sinyaller engellenmez, kalite etiketiyle gönderilir.
+#   ⭐     (5p)   → Fırsat (düşük güven)
+#   ⭐⭐   (6p)   → Sinyal (orta güven)
+#   ⭐⭐⭐ (7-8p) → Full Sniper (yüksek güven)
 
 SIGNAL_FILTER = {
     "enabled": True,
-    "min_adx": 25,        # ADX bu değerin üstünde olmalı
-    "min_rsi": 50,        # RSI bu değerin üstünde veya eşit olmalı
 
-    # İzin verilen OCC dizilimleri (pattern match)
-    # Her pattern: {timeframe: True=green, False=red}
+    # ---- Desen bazlı kurallar ----
+    # Her desen kendi min_adx ve min_rsi eşiğine sahip.
     "allowed_patterns": [
         {
             "name": "Dip Avcısı",
+            "description": "Derin düzeltme sonrası dönüş",
             "pattern": {"1w": True, "1d": True, "4h": False, "1h": False, "15m": True},
+            "min_adx": 20,       # Düzeltmede ADX düşük olabilir
+            "max_adx": 50,       # ADX > 50 ise hareket bitmiş olabilir
+            "min_rsi": 35,       # Dip bölgesinde RSI düşük olur
+        },
+        {
+            "name": "Trend Takipçi",
+            "description": "4H ve 1H da yeşil, trend devamı",
+            "pattern": {"1w": True, "1d": True, "4h": True, "1h": False, "15m": True},
+            "min_adx": 25,       # Güçlü trend gerekli
+            "min_rsi": 50,       # Momentum devam etmeli
+        },
+        {
+            "name": "Trend Takipçi v2",
+            "description": "1H yeşil, 4H kırmızı ama üst TF'ler güçlü",
+            "pattern": {"1w": True, "1d": True, "4h": False, "1h": True, "15m": True},
+            "min_adx": 22,
+            "min_rsi": 42,
+        },
+        {
+            "name": "Güçlü Momentum",
+            "description": "4H ve 1H ikisi de yeşil, güçlü yükseliş",
+            "pattern": {"1w": True, "1d": True, "4h": True, "1h": True, "15m": True},
+            "min_adx": 22,
+            "min_rsi": 45,
         },
     ],
 
-    # Full Sniper (puan >= 7) her zaman izin verilir (ADX/RSI filtresi ile)
+    # ---- Full Sniper (puan >= 7) ----
     "allow_full_sniper": True,
     "full_sniper_min_score": 7,
+    "full_sniper_min_adx": 22,   # Full Sniper zaten güçlü, ADX esnetilebilir
+    "full_sniper_min_rsi": 45,
+
+    # ---- Puan bazlı geçiş (desen eşleşmese bile) ----
+    # Puan >= 6 ve 1w veya 1d'den en az biri yeşilse geçiş izni
+    "score_fallback": {
+        "enabled": True,
+        "min_score": 6,
+        "require_upper_tf": True,   # 1w veya 1d'den biri yeşil olmalı
+        "min_adx": 22,
+        "min_rsi": 45,
+    },
+
+    # ---- Yıldız bazlı kalite sistemi ----
+    # Tüm geçerli sinyaller gönderilir, puana göre etiketlenir.
+    "star_rating": {
+        "enabled": True,
+        "tiers": [
+            # (min_score, yıldız, etiket, pozisyon_önerisi)
+            {"min_score": 8, "stars": "⭐⭐⭐", "label": "Full Sniper",    "position_pct": 100},
+            {"min_score": 7, "stars": "⭐⭐⭐", "label": "Full Sniper",    "position_pct": 100},
+            {"min_score": 6, "stars": "⭐⭐",   "label": "Güçlü Sinyal",   "position_pct": 75},
+            {"min_score": 5, "stars": "⭐",     "label": "Fırsat",         "position_pct": 50},
+        ],
+    },
 }
 
 # OCC hesaplama parametreleri (tüm TF'ler için aynı)

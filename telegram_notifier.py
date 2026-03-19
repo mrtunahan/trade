@@ -127,18 +127,24 @@ class TelegramNotifier:
             )
         heatmap_text = "\n".join(heatmap_lines)
 
-        # Puan seviyesi
+        # Puan seviyesi — yıldız bazlı kalite sistemi
         score = signal.total_score
         max_score = signal.max_score
-        if score >= 7:
+        rating = signal.signal_star_rating
+        stars = rating["stars"]
+        score_label = rating["label"]
+
+        # Sinyal başlığı için emoji
+        star_count = stars.count("⭐")
+        if star_count >= 3:
             score_emoji = "🔥🔥🔥"
-            score_label = "Full Sniper"
-        elif score >= 5:
+        elif star_count >= 2:
             score_emoji = "🔥🔥"
-            score_label = "Strong"
         else:
             score_emoji = "🔥"
-            score_label = "Normal"
+
+        # Eşleşen desen adı
+        matched_pattern = getattr(signal, 'matched_pattern_name', '') or ""
 
         # RSI bilgisi
         rsi_val = signal.rsi_value
@@ -174,6 +180,11 @@ class TelegramNotifier:
         sl_price = price * (1 - sl_pct / 100)
         tp_price = price * (1 + tp_pct / 100)
 
+        # Desen bilgisi satırı
+        pattern_line = ""
+        if matched_pattern:
+            pattern_line = f"🏷 <b>Strateji:</b> {matched_pattern}\n"
+
         message = (
             f"{score_emoji} <b>ALIM SİNYALİ — {base}/{quote}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
@@ -183,9 +194,10 @@ class TelegramNotifier:
             f"💰 <b>Hedef:</b> {tp_price:,.4f} (+%{tp_pct:.1f})\n"
             f"📊 <b>R:R:</b> 1:{tp_pct/sl_pct:.1f}\n"
             f"\n"
-            f"<b>OCC Heatmap:</b> {score}/{max_score}p ({score_label})\n"
+            f"<b>OCC Heatmap:</b> {score}/{max_score}p — {stars} {score_label}\n"
             f"{heatmap_text}\n"
             f"\n"
+            f"{pattern_line}"
             f"{rsi_emoji} {rsi_text}\n"
             f"{adx_emoji} {adx_text}\n"
             f"💼 Pozisyon: %{signal.position_size_pct*100:.0f} ({signal.position_tier})\n"
