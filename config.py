@@ -205,7 +205,7 @@ DYNAMIC_STOP_LOSS = {
 # Haber/gelişme habercisi olabilir. Teknik analiz beklemeden bildirim gönderir.
 VOLUME_SPIKE = {
     "enabled": True,
-    "multiplier": 5.0,         # 24s ort. hacmin kaç katı → spike
+    "multiplier": 8.5,         # 24s ort. hacmin kaç katı → spike
     "cooldown_minutes": 60,    # Aynı coin için spike cooldown
     "min_volume_usdt": 50_000, # Spike'ın minimum USDT hacmi (spam önleme)
 }
