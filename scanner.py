@@ -12,6 +12,7 @@ import signal
 import logging
 from datetime import datetime, timedelta
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import (
     SCAN_INTERVAL,
@@ -24,6 +25,7 @@ from config import (
     OCC_MIN_SCORE,
     ONLY_TRY,
     NOTIFY_ALL_TF_CHANGES,
+    VOLUME_SPIKE,
 )
 from market_data import MarketData
 from analyzer import MultiTfOccAnalyzer
@@ -128,43 +130,132 @@ class Scanner:
 
     # ==================== TF VERİ ÇEKME ====================
 
+    # Cache süreleri (saniye): üst TF'ler daha uzun cache
+    CACHE_TTL = {
+        "1w": 3600,   # 1 saat
+        "1d": 1800,   # 30 dk
+        "4h": 600,    # 10 dk
+        "1h": 300,    # 5 dk
+        "15m": 60,    # 1 dk
+    }
+
     def _get_tf_data(self, symbol: str) -> dict:
         """
         Bir sembol için tüm 5 timeframe'in mum verisini çeker.
         Cache kullanır (TF'ye göre farklı cache süreleri).
+        Cache hit'lerde sleep atlanır, cache miss'ler paralel çekilir.
         Returns: {timeframe: DataFrame}
         """
         now = time.time()
         tf_data = {}
-
-        # Cache süreleri (saniye): üst TF'ler daha uzun cache
-        cache_ttl = {
-            "1w": 3600,   # 1 saat
-            "1d": 1800,   # 30 dk
-            "4h": 600,    # 10 dk
-            "1h": 300,    # 5 dk
-            "15m": 60,    # 1 dk
-        }
+        to_fetch = []  # Cache'de olmayan TF'ler
 
         for tf, (weight, limit, label) in OCC_TIMEFRAMES.items():
             cache_key = (symbol, tf)
             cached = self._tf_cache.get(cache_key)
-            ttl = cache_ttl.get(tf, 300)
+            ttl = self.CACHE_TTL.get(tf, 300)
 
             if cached and (now - cached[1]) < ttl:
                 tf_data[tf] = cached[0]
-                continue
+            else:
+                to_fetch.append((tf, limit))
 
-            # API'den çek
+        if not to_fetch:
+            return tf_data
+
+        # Cache miss olan TF'leri paralel çek (ThreadPoolExecutor)
+        def fetch_one(tf_limit):
+            tf, limit = tf_limit
             df = self.market.get_klines(symbol, interval=tf, limit=limit)
-            if df is not None and len(df) >= 30:
-                self._tf_cache[cache_key] = (df, now)
-                tf_data[tf] = df
+            return tf, df
 
-            # Rate limit
-            time.sleep(0.2)
+        with ThreadPoolExecutor(max_workers=min(len(to_fetch), 5)) as executor:
+            futures = {executor.submit(fetch_one, tl): tl for tl in to_fetch}
+            for future in as_completed(futures):
+                try:
+                    tf, df = future.result()
+                    if df is not None and len(df) >= 30:
+                        self._tf_cache[(symbol, tf)] = (df, now)
+                        tf_data[tf] = df
+                except Exception as e:
+                    tf, _ = futures[future]
+                    logger.warning(f"{symbol} {tf} paralel çekim hatası: {e}")
+
+        # Tek bir rate limit bekleme (paralel çekim sonrası)
+        time.sleep(0.2)
 
         return tf_data
+
+    # ==================== HACİM SPIKE TESPİTİ ====================
+
+    def _check_volume_spike(self, symbol: str, tf_data: dict) -> bool:
+        """
+        15dk hacmi, 24s ortalamanın X katını aşarsa spike tespit eder.
+        Spike varsa Telegram'a anında bildirim gönderir.
+        """
+        if not VOLUME_SPIKE.get("enabled", False):
+            return False
+
+        df_15m = tf_data.get("15m")
+        if df_15m is None or len(df_15m) < 100:
+            return False
+
+        # Cooldown kontrolü
+        if self._is_on_cooldown(symbol, "volume_spike"):
+            return False
+
+        # Son 15dk mum hacmi (quote volume — USDT/TRY cinsinden)
+        current_vol = float(df_15m["quote_volume"].iloc[-2])  # Son kapanmış mum
+
+        # 24 saatlik ortalama 15dk hacim (96 mum = 24 saat)
+        lookback = min(96, len(df_15m) - 1)
+        avg_vol = float(df_15m["quote_volume"].iloc[-lookback-1:-1].mean())
+
+        if avg_vol <= 0:
+            return False
+
+        multiplier = VOLUME_SPIKE.get("multiplier", 5.0)
+        min_vol = VOLUME_SPIKE.get("min_volume_usdt", 50_000)
+        ratio = current_vol / avg_vol
+
+        if ratio >= multiplier and current_vol >= min_vol:
+            # Spike tespit edildi!
+            price = float(df_15m["close"].iloc[-1])
+            logger.info(
+                f"🚨 HACİM SPIKE: {symbol} | "
+                f"Hacim: {current_vol:,.0f} ({ratio:.1f}x ortalama)"
+            )
+
+            self._send_volume_spike_alert(symbol, price, current_vol, avg_vol, ratio)
+            cooldown_min = VOLUME_SPIKE.get("cooldown_minutes", 60)
+            self.alert_cooldowns[(symbol, "volume_spike")] = datetime.now()
+            return True
+
+        return False
+
+    def _send_volume_spike_alert(self, symbol: str, price: float,
+                                  current_vol: float, avg_vol: float, ratio: float):
+        """Volume spike Telegram bildirimi gönderir."""
+        quote = "TRY" if symbol.endswith("TRY") else "USDT"
+        base = symbol.replace("TRY", "").replace("USDT", "")
+
+        message = (
+            f"🚨 <b>ANORMAL HACİM — {base}/{quote}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"\n"
+            f"📊 <b>15dk Hacim:</b> {current_vol:,.0f} {quote}\n"
+            f"📈 <b>24s Ortalama:</b> {avg_vol:,.0f} {quote}\n"
+            f"⚡ <b>Oran:</b> {ratio:.1f}x (>{VOLUME_SPIKE.get('multiplier', 5)}x eşik)\n"
+            f"\n"
+            f"💰 <b>Fiyat:</b> {price:,.4f} {quote}\n"
+            f"\n"
+            f"⚠️ <i>Muhtemel haber/gelişme habercisi.</i>\n"
+            f"<i>Teknik analiz ile doğrulayın.</i>\n"
+            f"\n"
+            f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"🔗 <a href='https://www.tradingview.com/chart/?symbol=BINANCE:{symbol}'>TradingView</a>"
+        )
+        self.telegram.send_message(message)
 
     # ==================== TARAMA DÖNGÜSÜ ====================
 
@@ -188,6 +279,9 @@ class Scanner:
                     continue
 
                 scanned += 1
+
+                # 0. Hacim spike kontrolü (haber/gelişme habercisi)
+                self._check_volume_spike(symbol, tf_data)
 
                 # 1. Her TF'deki renk değişimlerini kontrol et
                 if NOTIFY_ALL_TF_CHANGES:
@@ -233,8 +327,8 @@ class Scanner:
                             self.daily_signals.append(signal)
                             logger.info(f"✅ Sinyal gönderildi: {symbol}")
 
-                # Rate limit
-                if (i + 1) % 5 == 0:
+                # Rate limit (her 10 paritede 1s — Binance rate limit'e uygun)
+                if (i + 1) % 10 == 0:
                     time.sleep(1)
 
             except Exception as e:

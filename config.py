@@ -26,7 +26,7 @@ BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 BINANCE_BASE_URL   = "https://api.binance.me"
 
 # ==================== TARAMA AYARLARI ====================
-SCAN_INTERVAL = 900      # Her 15 dakikada bir tara (tarama ~11dk sürüyor)
+SCAN_INTERVAL = 900      # Her 15 dakikada bir tara (paralel TF ile ~2-3dk)
 KLINE_INTERVAL = "15m"   # Tetikleyici timeframe (15dk)
 KLINE_LIMIT = 250
 
@@ -198,6 +198,16 @@ DYNAMIC_STOP_LOSS = {
         "atr_multiplier": 2.5,
         "activation_pct": 2.0,
     },
+}
+
+# ==================== HACİM SPIKE TESPİTİ ====================
+# 15dk hacim, 24s ortalama hacmin X katına çıkarsa anormal hacim uyarısı.
+# Haber/gelişme habercisi olabilir. Teknik analiz beklemeden bildirim gönderir.
+VOLUME_SPIKE = {
+    "enabled": True,
+    "multiplier": 5.0,         # 24s ort. hacmin kaç katı → spike
+    "cooldown_minutes": 60,    # Aynı coin için spike cooldown
+    "min_volume_usdt": 50_000, # Spike'ın minimum USDT hacmi (spam önleme)
 }
 
 # ==================== BİLDİRİM AYARLARI ====================
