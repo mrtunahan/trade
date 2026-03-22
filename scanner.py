@@ -26,6 +26,7 @@ from config import (
     ONLY_TRY,
     NOTIFY_ALL_TF_CHANGES,
     VOLUME_SPIKE,
+    STABLECOIN_BLACKLIST,
 )
 from market_data import MarketData
 from analyzer import MultiTfOccAnalyzer
@@ -98,6 +99,10 @@ class Scanner:
             combined = all_pairs["TRY"]
         else:
             combined = all_pairs["TRY"] + all_pairs["USDT"]
+
+        # Stablecoin blacklist filtresi
+        combined = [p for p in combined
+                    if not any(p.startswith(s) for s in STABLECOIN_BLACKLIST)]
 
         self.pairs = self.market.filter_by_volume(combined)
         self.last_pair_refresh = now

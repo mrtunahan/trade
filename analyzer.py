@@ -148,9 +148,11 @@ class MultiTfSignal:
         """
         Giriş sinyali geçerli mi?
 
-        Sadece 2 sinyal tipi aktif:
-        1. Dip Avcısı: 🟢1w 🟢1d 🔴4h 🔴1h 🟢15m + ADX > 25 + RSI >= 50
-        2. Full Sniper: Tüm TF'ler yeşil (puan >= 7) + ADX > 25 + RSI >= 50
+        4 sinyal tipi aktif:
+        1. Dip Avcısı:       🟢1w 🟢1d 🔴4h 🔴1h 🟢15m + ADX > 25 + RSI >= 50
+        2. Trend Takipçi:    🟢1w 🟢1d 🟢4h 🔴1h 🟢15m + ADX > 25 + RSI >= 50
+        3. Trend Takipçi v2: 🟢1w 🟢1d 🔴4h 🟢1h 🟢15m + ADX > 25 + RSI >= 50
+        4. Full Sniper:      Tüm TF'ler yeşil (puan >= 7) + ADX > 25 + RSI >= 50
         """
         # Temel koşullar: 15dk tetikleyici yeşil olmalı
         if not self.trigger_crossed:

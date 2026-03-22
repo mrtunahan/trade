@@ -37,7 +37,7 @@ ONLY_TRY = False    # Tüm pariteleri tara (TRY + USDT)
 MANUAL_TRY_PAIRS = [
     "BTCTRY", "ETHTRY", "BNBTRY", "XRPTRY", "SOLTRY",
     "AVXTRY", "DOGETRY", "ADATRY", "DOTTRY", "MATICTRY",
-    "LINKTRY", "SHIBTRY", "LTCTRY", "BIOTRY", "USDTTRY",
+    "LINKTRY", "SHIBTRY", "LTCTRY", "BIOTRY",
 ]
 MANUAL_USDT_PAIRS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
@@ -45,7 +45,14 @@ MANUAL_USDT_PAIRS = [
 ]
 
 # Minimum 24s işlem hacmi filtresi (USDT cinsinden)
-MIN_VOLUME_USDT = 100_000
+MIN_VOLUME_USDT = 25_000
+
+# ==================== STABLECOİN BLACKLIST ====================
+# Bu coinler tarama listesinden otomatik çıkarılır (sahte sinyal önleme).
+STABLECOIN_BLACKLIST = {
+    "USDT", "USDC", "FDUSD", "DAI", "TUSD", "BUSD", "EUR", "GBP",
+    "EURT", "AEUR", "BIDR", "IDRT", "UAH", "BRL", "ARS", "PLN",
+}
 
 # ==================== HİYERARŞİK OCC PUANLAMA ====================
 # Her timeframe'de OCC durumu (yeşil/kırmızı) kontrol edilir.
@@ -73,9 +80,11 @@ OCC_TIMEFRAMES = {
 OCC_MIN_SCORE = 5
 
 # ==================== SİNYAL FİLTRE KURALLARI ====================
-# Sadece 2 sinyal tipi aktif:
-# 1. Dip Avcısı: 🟢1w 🟢1d 🔴4h 🔴1h 🟢15m + ADX > 25 + RSI >= 50
-# 2. Full Sniper: Tüm TF'ler yeşil (puan >= 7) + ADX > 25 + RSI >= 50
+# 4 sinyal tipi aktif:
+# 1. Dip Avcısı:      🟢1w 🟢1d 🔴4h 🔴1h 🟢15m + ADX > 25 + RSI >= 50
+# 2. Trend Takipçi:   🟢1w 🟢1d 🟢4h 🔴1h 🟢15m + ADX > 25 + RSI >= 50
+# 3. Trend Takipçi v2:🟢1w 🟢1d 🔴4h 🟢1h 🟢15m + ADX > 25 + RSI >= 50
+# 4. Full Sniper:     Tüm TF'ler yeşil (puan >= 7) + ADX > 25 + RSI >= 50
 #
 # Yıldızlama sistemi: Sinyaller kalite etiketiyle gönderilir.
 #   ⭐     (5p)   → Fırsat (düşük güven)
@@ -95,6 +104,20 @@ SIGNAL_FILTER = {
             "min_adx": 25,       # ADX > 25 güçlü trend gerekli
             "max_adx": 50,       # ADX > 50 ise hareket bitmiş olabilir
             "min_rsi": 50,       # RSI >= 50 momentum başlamış olmalı
+        },
+        {
+            "name": "Trend Takipçi",
+            "description": "🟢1w 🟢1d 🟢4h 🔴1h 🟢15m — 4H yeşil, trend devamı",
+            "pattern": {"1w": True, "1d": True, "4h": True, "1h": False, "15m": True},
+            "min_adx": 25,       # Güçlü trend gerekli
+            "min_rsi": 50,       # Momentum devam etmeli
+        },
+        {
+            "name": "Trend Takipçi v2",
+            "description": "🟢1w 🟢1d 🔴4h 🟢1h 🟢15m — 1H yeşil, üst TF'ler güçlü",
+            "pattern": {"1w": True, "1d": True, "4h": False, "1h": True, "15m": True},
+            "min_adx": 25,       # Güçlü trend gerekli
+            "min_rsi": 50,       # Momentum devam etmeli
         },
     ],
 
