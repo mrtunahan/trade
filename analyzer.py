@@ -148,10 +148,9 @@ class MultiTfSignal:
         """
         Giriş sinyali geçerli mi?
 
-        Desen bazlı dinamik eşik sistemi:
-        1. Tanımlı desenlerden biri eşleşirse → o desenin ADX/RSI eşikleri
-        2. Full Sniper (puan >= 7) → kendi ADX/RSI eşikleri
-        3. Puan >= 6 + üst TF koruması → genel eşikler (score_fallback)
+        Sadece 2 sinyal tipi aktif:
+        1. Dip Avcısı: 🟢1w 🟢1d 🔴4h 🔴1h 🟢15m + ADX > 25 + RSI >= 50
+        2. Full Sniper: Tüm TF'ler yeşil (puan >= 7) + ADX > 25 + RSI >= 50
         """
         # Temel koşullar: 15dk tetikleyici yeşil olmalı
         if not self.trigger_crossed:
