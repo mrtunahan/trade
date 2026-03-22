@@ -185,6 +185,37 @@ class TelegramNotifier:
         if matched_pattern:
             pattern_line = f"🏷 <b>Strateji:</b> {matched_pattern}\n"
 
+        # Hacim onayı satırı
+        volume_line = ""
+        vol_ratio = getattr(signal, 'volume_ratio', 0)
+        vol_label = getattr(signal, 'volume_label', '')
+        vol_surge = getattr(signal, 'volume_surge', False)
+        vol_confirmed = getattr(signal, 'volume_confirmed', False)
+        if vol_ratio > 0:
+            if vol_surge:
+                volume_line = f"🔥 <b>Hacim:</b> {vol_ratio:.1f}x — {vol_label}\n"
+            elif vol_confirmed:
+                volume_line = f"📊 <b>Hacim:</b> {vol_ratio:.1f}x — {vol_label}\n"
+            elif vol_label == "Düşük Hacim":
+                volume_line = f"⚠️ <b>Hacim:</b> {vol_ratio:.1f}x — {vol_label}\n"
+            else:
+                volume_line = f"📊 <b>Hacim:</b> {vol_ratio:.1f}x\n"
+
+        # RSI Divergence satırı
+        div_line = ""
+        rsi_div = getattr(signal, 'rsi_divergence', 'none')
+        div_strength = getattr(signal, 'rsi_div_strength', 0)
+        if rsi_div == "bullish":
+            div_line = f"📈 <b>RSI Uyumsuzluk:</b> Bullish Divergence (+{div_strength:.0f}) — Dönüş sinyali\n"
+        elif rsi_div == "bearish":
+            div_line = f"📉 <b>RSI Uyumsuzluk:</b> Bearish Divergence (-{div_strength:.0f}) — Dikkat\n"
+
+        # Boost bilgisi satırı
+        boost_line = ""
+        boost_reason = rating.get("boost_reason", "")
+        if boost_reason:
+            boost_line = f"⚡ <b>Kalite:</b> {boost_reason}\n"
+
         message = (
             f"{score_emoji} <b>ALIM SİNYALİ — {base}/{quote}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
@@ -198,8 +229,11 @@ class TelegramNotifier:
             f"{heatmap_text}\n"
             f"\n"
             f"{pattern_line}"
+            f"{volume_line}"
+            f"{div_line}"
             f"{rsi_emoji} {rsi_text}\n"
             f"{adx_emoji} {adx_text}\n"
+            f"{boost_line}"
             f"💼 Pozisyon: %{signal.position_size_pct*100:.0f} ({signal.position_tier})\n"
             f"\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
