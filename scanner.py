@@ -186,9 +186,6 @@ class Scanner:
                     tf, _ = futures[future]
                     logger.warning(f"{symbol} {tf} paralel çekim hatası: {e}")
 
-        # Tek bir rate limit bekleme (paralel çekim sonrası)
-        time.sleep(0.2)
-
         return tf_data
 
     # ==================== HACİM SPIKE TESPİTİ ====================
@@ -264,8 +261,50 @@ class Scanner:
 
     # ==================== TARAMA DÖNGÜSÜ ====================
 
+    # ==================== PARALEL TARAMA ====================
+
+    PAIR_BATCH_SIZE = 5     # Aynı anda taranacak parite sayısı
+    BATCH_SLEEP = 0.5       # Her batch arasında bekleme (rate limit koruması)
+
+    def _scan_single_pair(self, symbol: str) -> dict:
+        """
+        Tek bir pariteyi tarar. Thread-safe.
+        Returns: {"symbol": str, "signal": Signal|None, "changes": list, "ok": bool}
+        """
+        result = {"symbol": symbol, "signal": None, "changes": [], "spike": False, "ok": False}
+        try:
+            tf_data = self._get_tf_data(symbol)
+            if not tf_data:
+                return result
+
+            result["ok"] = True
+
+            # Hacim spike kontrolü
+            result["spike"] = self._check_volume_spike(symbol, tf_data)
+
+            # TF renk değişimleri
+            if NOTIFY_ALL_TF_CHANGES:
+                result["changes"] = self.analyzer.check_tf_changes(symbol, tf_data)
+
+            # Multi-TF analiz
+            signal = self.analyzer.analyze_multi_tf(symbol, tf_data)
+            if signal and signal.is_valid_entry:
+                # Chart üretimi (CPU-bound, thread içinde yapılabilir)
+                if SEND_CHART_IMAGE:
+                    df_15m = tf_data.get("15m")
+                    if df_15m is not None:
+                        signal._chart_bytes = generate_signal_chart(
+                            symbol, df_15m, signal.indicators
+                        )
+                result["signal"] = signal
+
+        except Exception as e:
+            logger.error(f"{symbol} tarama hatası: {e}")
+
+        return result
+
     def scan_once(self) -> list:
-        """Tüm pariteleri bir kez tarar."""
+        """Tüm pariteleri paralel batch'ler halinde tarar."""
         pairs = self.refresh_pairs()
         signals_found = []
         scanned = 0
@@ -273,25 +312,29 @@ class Scanner:
 
         logger.info(f"Tarama başlıyor: {len(pairs)} parite, {len(OCC_TIMEFRAMES)} TF...")
 
-        for i, symbol in enumerate(pairs):
+        # Parite listesini batch'lere böl
+        batch_size = self.PAIR_BATCH_SIZE
+        for batch_start in range(0, len(pairs), batch_size):
             if not self.running:
                 break
 
-            try:
-                # 5 TF verisi çek
-                tf_data = self._get_tf_data(symbol)
-                if not tf_data:
-                    continue
+            batch = pairs[batch_start:batch_start + batch_size]
 
-                scanned += 1
+            # Batch'i paralel tara
+            with ThreadPoolExecutor(max_workers=batch_size) as executor:
+                futures = {executor.submit(self._scan_single_pair, sym): sym
+                           for sym in batch}
+                for future in as_completed(futures):
+                    result = future.result()
+                    symbol = result["symbol"]
 
-                # 0. Hacim spike kontrolü (haber/gelişme habercisi)
-                self._check_volume_spike(symbol, tf_data)
+                    if not result["ok"]:
+                        continue
 
-                # 1. Her TF'deki renk değişimlerini kontrol et
-                if NOTIFY_ALL_TF_CHANGES:
-                    changes = self.analyzer.check_tf_changes(symbol, tf_data)
-                    for change in changes:
+                    scanned += 1
+
+                    # Renk değişimi bildirimleri (sıralı — Telegram çağrıları)
+                    for change in result["changes"]:
                         tf_status = change.tf_statuses[0]
                         cooldown_key = f"{tf_status.timeframe}_change"
                         if not self._is_on_cooldown(symbol, cooldown_key):
@@ -304,10 +347,9 @@ class Scanner:
                             if success:
                                 self._set_cooldown(symbol, cooldown_key)
 
-                # 2. Multi-TF analiz (ALIM sinyali kontrolü)
-                signal = self.analyzer.analyze_multi_tf(symbol, tf_data)
-                if signal and signal.is_valid_entry:
-                    if not self._is_on_cooldown(symbol, "entry"):
+                    # Alım sinyali bildirimi
+                    signal = result["signal"]
+                    if signal and not self._is_on_cooldown(symbol, "entry"):
                         logger.info(
                             f"🔔 ALIM SİNYALİ: {symbol} | "
                             f"Puan: {signal.total_score}/{signal.max_score} | "
@@ -315,14 +357,7 @@ class Scanner:
                             f"ADX: {signal.adx_value:.1f} ({signal.adx_regime})"
                         )
 
-                        chart_bytes = None
-                        if SEND_CHART_IMAGE:
-                            df_15m = tf_data.get("15m")
-                            if df_15m is not None:
-                                chart_bytes = generate_signal_chart(
-                                    symbol, df_15m, signal.indicators
-                                )
-
+                        chart_bytes = getattr(signal, "_chart_bytes", None)
                         success = self.telegram.send_multi_tf_signal(
                             signal, chart_bytes=chart_bytes
                         )
@@ -332,16 +367,8 @@ class Scanner:
                             self.daily_signals.append(signal)
                             logger.info(f"✅ Sinyal gönderildi: {symbol}")
 
-                # Rate limit (her 10 paritede 1s — Binance rate limit'e uygun)
-                if (i + 1) % 10 == 0:
-                    time.sleep(1)
-
-            except Exception as e:
-                errors += 1
-                logger.error(f"{symbol} tarama hatası: {e}")
-                if errors > 10:
-                    logger.error("Çok fazla hata, tarama durduruluyor")
-                    break
+            # Batch arası rate limit bekleme
+            time.sleep(self.BATCH_SLEEP)
 
         logger.info(f"Tarama tamamlandı: {scanned} tarandı, {len(signals_found)} sinyal bulundu")
         return signals_found
