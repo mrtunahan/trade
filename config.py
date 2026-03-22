@@ -73,14 +73,11 @@ OCC_TIMEFRAMES = {
 OCC_MIN_SCORE = 5
 
 # ==================== SİNYAL FİLTRE KURALLARI ====================
-# Desen bazlı dinamik eşik sistemi:
-# Her desen kendi ADX/RSI eşiklerine sahiptir.
+# Sadece 2 sinyal tipi aktif:
+# 1. Dip Avcısı: 🟢1w 🟢1d 🔴4h 🔴1h 🟢15m + ADX > 25 + RSI >= 50
+# 2. Full Sniper: Tüm TF'ler yeşil (puan >= 7) + ADX > 25 + RSI >= 50
 #
-# Kural 1: Tanımlı desenlere eşleşen coinler → desen bazlı ADX/RSI filtresi
-# Kural 2: Full Sniper (puan >= 7) → kendi ADX/RSI eşikleri
-# Kural 3: Puan >= 6 + üst TF koruması (1w veya 1d yeşil) → genel eşikler
-#
-# Yıldızlama sistemi: Sinyaller engellenmez, kalite etiketiyle gönderilir.
+# Yıldızlama sistemi: Sinyaller kalite etiketiyle gönderilir.
 #   ⭐     (5p)   → Fırsat (düşük güven)
 #   ⭐⭐   (6p)   → Sinyal (orta güven)
 #   ⭐⭐⭐ (7-8p) → Full Sniper (yüksek güven)
@@ -93,49 +90,23 @@ SIGNAL_FILTER = {
     "allowed_patterns": [
         {
             "name": "Dip Avcısı",
-            "description": "Derin düzeltme sonrası dönüş",
+            "description": "🟢1w 🟢1d 🔴4h 🔴1h 🟢15m — Derin düzeltme sonrası dönüş",
             "pattern": {"1w": True, "1d": True, "4h": False, "1h": False, "15m": True},
-            "min_adx": 20,       # Düzeltmede ADX düşük olabilir
+            "min_adx": 25,       # ADX > 25 güçlü trend gerekli
             "max_adx": 50,       # ADX > 50 ise hareket bitmiş olabilir
-            "min_rsi": 35,       # Dip bölgesinde RSI düşük olur
-        },
-        {
-            "name": "Trend Takipçi",
-            "description": "4H ve 1H da yeşil, trend devamı",
-            "pattern": {"1w": True, "1d": True, "4h": True, "1h": False, "15m": True},
-            "min_adx": 25,       # Güçlü trend gerekli
-            "min_rsi": 50,       # Momentum devam etmeli
-        },
-        {
-            "name": "Trend Takipçi v2",
-            "description": "1H yeşil, 4H kırmızı ama üst TF'ler güçlü",
-            "pattern": {"1w": True, "1d": True, "4h": False, "1h": True, "15m": True},
-            "min_adx": 22,
-            "min_rsi": 42,
-        },
-        {
-            "name": "Güçlü Momentum",
-            "description": "4H ve 1H ikisi de yeşil, güçlü yükseliş",
-            "pattern": {"1w": True, "1d": True, "4h": True, "1h": True, "15m": True},
-            "min_adx": 22,
-            "min_rsi": 45,
+            "min_rsi": 50,       # RSI >= 50 momentum başlamış olmalı
         },
     ],
 
-    # ---- Full Sniper (puan >= 7) ----
+    # ---- Full Sniper (puan >= 7, tüm TF'ler yeşil) ----
     "allow_full_sniper": True,
     "full_sniper_min_score": 7,
-    "full_sniper_min_adx": 22,   # Full Sniper zaten güçlü, ADX esnetilebilir
-    "full_sniper_min_rsi": 45,
+    "full_sniper_min_adx": 25,   # ADX > 25 güçlü trend gerekli
+    "full_sniper_min_rsi": 50,   # RSI >= 50 momentum gerekli
 
-    # ---- Puan bazlı geçiş (desen eşleşmese bile) ----
-    # Puan >= 6 ve 1w veya 1d'den en az biri yeşilse geçiş izni
+    # ---- Puan bazlı geçiş — DEVRE DIŞI ----
     "score_fallback": {
-        "enabled": True,
-        "min_score": 6,
-        "require_upper_tf": True,   # 1w veya 1d'den biri yeşil olmalı
-        "min_adx": 22,
-        "min_rsi": 45,
+        "enabled": False,
     },
 
     # ---- Yıldız bazlı kalite sistemi ----
@@ -204,7 +175,7 @@ DYNAMIC_STOP_LOSS = {
 # 15dk hacim, 24s ortalama hacmin X katına çıkarsa anormal hacim uyarısı.
 # Haber/gelişme habercisi olabilir. Teknik analiz beklemeden bildirim gönderir.
 VOLUME_SPIKE = {
-    "enabled": True,
+    "enabled": False,          # Hacim spike bildirimleri devre dışı
     "multiplier": 8.5,         # 24s ort. hacmin kaç katı → spike
     "cooldown_minutes": 60,    # Aynı coin için spike cooldown
     "min_volume_usdt": 50_000, # Spike'ın minimum USDT hacmi (spam önleme)
