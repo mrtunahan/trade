@@ -36,6 +36,16 @@ class MarketData:
         self.base_url = BINANCE_BASE_URL
         self.session = requests.Session()
         self.session.headers.update({"X-MBX-APIKEY": BINANCE_API_KEY})
+
+        # Connection pool boyutunu paralel taramaya uygun ayarla
+        # 5 pair × 5 TF = 25 eşzamanlı bağlantı olabilir
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=30,
+            pool_maxsize=30,
+        )
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
         self._symbol_cache = {}
         self._usdt_try_rate = None
         self._rate_ts = 0
