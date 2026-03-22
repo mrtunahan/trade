@@ -20,6 +20,7 @@ import pandas as pd
 from config import (
     OCC_TIMEFRAMES, OCC_MIN_SCORE, OCC_PERIOD, OCC_MA_TYPE, OCC_MIN_STRENGTH,
     RSI_CONFIG, ADX_CONFIG, DYNAMIC_STOP_LOSS, SIGNAL_FILTER,
+    VOLUME_CONFIRM, RSI_DIVERGENCE,
 )
 
 logger = logging.getLogger("Analyzer")
@@ -139,6 +140,16 @@ class MultiTfSignal:
     stop_loss_pct: float = 3.0
     take_profit_pct: float = 6.0
 
+    # Hacim Onayı
+    volume_ratio: float = 0.0        # Mevcut hacim / ortalama hacim
+    volume_confirmed: bool = False    # volume_ratio >= confirm_ratio
+    volume_surge: bool = False        # volume_ratio >= surge_ratio
+    volume_label: str = ""            # "Hacim Patlaması", "Hacim Onaylı", "Düşük Hacim"
+
+    # RSI Divergence
+    rsi_divergence: str = "none"      # "bullish", "bearish", "none"
+    rsi_div_strength: float = 0.0     # RSI fark büyüklüğü (güç göstergesi)
+
     # Meta
     indicators: dict = field(default_factory=dict)
     market_regime: str = "unknown"
@@ -228,26 +239,66 @@ class MultiTfSignal:
     @property
     def signal_star_rating(self) -> dict:
         """
-        Yıldız bazlı kalite sistemi.
-        Returns: {"stars": "⭐⭐", "label": "Güçlü Sinyal", "position_pct": 75}
+        Yıldız bazlı kalite sistemi + hacim/divergence boost.
+
+        Temel yıldız: Puana göre belirlenir (config tiers).
+        Boost: Hacim surge veya bullish divergence varsa yıldız artırılır.
+        Penalty: Düşük hacimde pozisyon küçültülür.
+
+        Returns: {"stars": "⭐⭐", "label": "Güçlü Sinyal", "position_pct": 75,
+                  "boosted": bool, "boost_reason": str}
         """
         cfg = SIGNAL_FILTER.get("star_rating", {})
         if not cfg.get("enabled", False):
-            # Eski davranış
             if self.total_score >= 7:
-                return {"stars": "⭐⭐⭐", "label": "Full Sniper", "position_pct": 100}
+                return {"stars": "⭐⭐⭐", "label": "Full Sniper",
+                        "position_pct": 100, "boosted": False, "boost_reason": ""}
             elif self.total_score >= 5:
-                return {"stars": "⭐⭐", "label": "Güçlü Sinyal", "position_pct": 75}
-            return {"stars": "⭐", "label": "Fırsat", "position_pct": 50}
+                return {"stars": "⭐⭐", "label": "Güçlü Sinyal",
+                        "position_pct": 75, "boosted": False, "boost_reason": ""}
+            return {"stars": "⭐", "label": "Fırsat",
+                    "position_pct": 50, "boosted": False, "boost_reason": ""}
 
+        # Temel tier (puan bazlı)
+        base = {"stars": "⭐", "label": "Fırsat", "position_pct": 50}
         for tier in cfg.get("tiers", []):
             if self.total_score >= tier["min_score"]:
-                return {
+                base = {
                     "stars": tier["stars"],
                     "label": tier["label"],
                     "position_pct": tier["position_pct"],
                 }
-        return {"stars": "⭐", "label": "Fırsat", "position_pct": 50}
+                break
+
+        # ---- Boost/Penalty sistemi ----
+        boost_reasons = []
+
+        # Hacim surge boost: yıldız + pozisyon artır
+        if self.volume_surge and VOLUME_CONFIRM.get("boost_star", True):
+            if base["stars"].count("⭐") < 3:
+                base["stars"] += "⭐"
+            base["position_pct"] = min(base["position_pct"] + 25, 100)
+            boost_reasons.append("Hacim Patlaması")
+
+        # Bullish divergence boost: pozisyon artır
+        if self.rsi_divergence == "bullish":
+            base["position_pct"] = min(base["position_pct"] + 15, 100)
+            boost_reasons.append(f"Bullish Div (+{self.rsi_div_strength:.0f})")
+
+        # Düşük hacim penalty: pozisyon küçült
+        if self.volume_label == "Düşük Hacim":
+            base["position_pct"] = max(base["position_pct"] - 25, 25)
+            boost_reasons.append("Düşük Hacim ⚠️")
+
+        # Bearish divergence warning: pozisyon küçült
+        if self.rsi_divergence == "bearish":
+            base["position_pct"] = max(base["position_pct"] - 20, 25)
+            boost_reasons.append("Bearish Div ⚠️")
+
+        base["boosted"] = len(boost_reasons) > 0
+        base["boost_reason"] = " | ".join(boost_reasons)
+
+        return base
 
     @property
     def score_pct(self) -> float:
@@ -403,6 +454,15 @@ class MultiTfOccAnalyzer:
         # SL/TP hesapla
         sl_pct, tp_pct = self._calculate_sl_tp(adx_value)
 
+        # Hacim onayı (15dk verisinden)
+        vol_data = self._calculate_volume_confirmation(tf_data.get("15m"))
+
+        # RSI Divergence (15dk veya 1H verisinden)
+        div_df = tf_data.get("15m")
+        if div_df is None or len(div_df) < RSI_DIVERGENCE.get("lookback", 50):
+            div_df = tf_data.get("1h")
+        rsi_div = self._detect_rsi_divergence(div_df)
+
         signal = MultiTfSignal(
             symbol=symbol,
             signal_type="buy" if trigger_crossed and total_score >= OCC_MIN_SCORE else "info",
@@ -418,8 +478,19 @@ class MultiTfOccAnalyzer:
             adx_regime=adx_regime,
             stop_loss_pct=sl_pct,
             take_profit_pct=tp_pct,
+            volume_ratio=vol_data["ratio"],
+            volume_confirmed=vol_data["confirmed"],
+            volume_surge=vol_data["surge"],
+            volume_label=vol_data["label"],
+            rsi_divergence=rsi_div["type"],
+            rsi_div_strength=rsi_div["strength"],
             market_regime=adx_regime,
-            indicators={"rsi_value": rsi_value, "adx_value": adx_value},
+            indicators={
+                "rsi_value": rsi_value,
+                "adx_value": adx_value,
+                "volume_ratio": vol_data["ratio"],
+                "rsi_divergence": rsi_div["type"],
+            },
         )
 
         return signal
@@ -588,6 +659,225 @@ class MultiTfOccAnalyzer:
         elif adx_value <= cfg.get("ranging_adx", 20):
             return cfg["range_sl_pct"], cfg["range_tp_pct"]
         return cfg["base_sl_pct"], cfg["base_tp_pct"]
+
+    # ==================== HACİM ONAYI ====================
+
+    def _calculate_volume_confirmation(self, df: pd.DataFrame) -> dict:
+        """
+        15dk verisinden hacim onay metrikleri hesaplar.
+
+        Non-repaint: iloc[-2] kullanır (son kapanmış mum).
+        Karşılaştırma: Son kapanmış mum hacmi vs N-bar ortalama.
+
+        Returns: {
+            "ratio": float,        # Hacim oranı (current / average)
+            "confirmed": bool,     # >= confirm_ratio (1.5x)
+            "surge": bool,         # >= surge_ratio (3.0x)
+            "label": str,          # İnsan okunabilir etiket
+        }
+        """
+        cfg = VOLUME_CONFIRM
+        result = {"ratio": 0.0, "confirmed": False, "surge": False, "label": ""}
+
+        if not cfg.get("enabled", True):
+            return result
+
+        if df is None or len(df) < cfg.get("period", 20) + 2:
+            return result
+
+        vol = df["quote_volume"]  # USDT/TRY cinsinden hacim
+        period = cfg.get("period", 20)
+
+        # Non-repaint: Son kapanmış mum (iloc[-2])
+        current_vol = float(vol.iloc[-2])
+
+        # Ortalama: Son N kapanmış mum ([-2-period:-2] aralığı)
+        avg_vol = float(vol.iloc[-(period + 2):-2].mean())
+
+        if avg_vol <= 0:
+            return result
+
+        ratio = current_vol / avg_vol
+        result["ratio"] = round(ratio, 2)
+
+        confirm_ratio = cfg.get("confirm_ratio", 1.5)
+        surge_ratio = cfg.get("surge_ratio", 3.0)
+        penalty_below = cfg.get("penalty_below", 0.5)
+
+        if ratio >= surge_ratio:
+            result["surge"] = True
+            result["confirmed"] = True
+            result["label"] = "Hacim Patlaması"
+        elif ratio >= confirm_ratio:
+            result["confirmed"] = True
+            result["label"] = "Hacim Onaylı"
+        elif ratio < penalty_below:
+            result["label"] = "Düşük Hacim"
+        else:
+            result["label"] = "Normal Hacim"
+
+        return result
+
+    # ==================== RSI DIVERGENCE ====================
+
+    def _find_pivot_lows(self, series: pd.Series,
+                         left: int = 5, right: int = 2) -> list:
+        """
+        Lokal minimumları (pivot low) tespit eder.
+
+        Bir noktanın pivot low olması için:
+        - Sol tarafındaki 'left' mum ondan büyük olmalı
+        - Sağ tarafındaki 'right' mum ondan büyük olmalı
+
+        Returns: [(index_position, value), ...]
+        """
+        pivots = []
+        arr = series.values
+
+        for i in range(left, len(arr) - right):
+            is_pivot = True
+            # Sol taraf kontrolü
+            for j in range(1, left + 1):
+                if arr[i] > arr[i - j]:
+                    is_pivot = False
+                    break
+            if not is_pivot:
+                continue
+            # Sağ taraf kontrolü
+            for j in range(1, right + 1):
+                if arr[i] > arr[i + j]:
+                    is_pivot = False
+                    break
+            if is_pivot:
+                pivots.append((i, float(arr[i])))
+
+        return pivots
+
+    def _detect_rsi_divergence(self, df: pd.DataFrame) -> dict:
+        """
+        RSI Bullish/Bearish Divergence tespiti.
+
+        Bullish Divergence (Boğa Uyumsuzluğu):
+        - Fiyat: daha düşük dip yapıyor (lower low)
+        - RSI: daha yüksek dip yapıyor (higher low)
+        → Satış baskısı zayıflıyor, dönüş sinyali
+
+        Bearish Divergence (Ayı Uyumsuzluğu):
+        - Fiyat: daha yüksek tepe yapıyor (higher high)
+        - RSI: daha düşük tepe yapıyor (lower high)
+        → Alım baskısı zayıflıyor, düşüş sinyali
+
+        Non-repaint: Sadece onaylanmış pivotlar kullanılır
+        (sağ tarafta 'pivot_right' mum onay bekler).
+
+        Returns: {
+            "type": "bullish" | "bearish" | "none",
+            "strength": float,     # RSI fark büyüklüğü
+            "price_drop_pct": float, # Fiyat düşüş yüzdesi
+        }
+        """
+        cfg = RSI_DIVERGENCE
+        result = {"type": "none", "strength": 0.0, "price_drop_pct": 0.0}
+
+        if not cfg.get("enabled", True):
+            return result
+
+        lookback = cfg.get("lookback", 50)
+        pivot_left = cfg.get("pivot_left", 5)
+        pivot_right = cfg.get("pivot_right", 2)
+        min_rsi_diff = cfg.get("min_rsi_diff", 5.0)
+        min_price_drop = cfg.get("min_price_drop_pct", 1.0)
+
+        if df is None or len(df) < lookback:
+            return result
+
+        # Son 'lookback' mumu al (non-repaint: son mumu hariç tut)
+        df_window = df.iloc[-(lookback + 1):-1].copy()
+
+        # RSI serisi hesapla
+        period = RSI_CONFIG.get("period", 14)
+        close = df_window["close"]
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0.0).rolling(period).mean()
+        loss = (-delta.where(delta < 0, 0.0)).rolling(period).mean()
+        rs = gain / loss.replace(0, np.nan)
+        rsi_series = 100 - (100 / (1 + rs))
+
+        low = df_window["low"]
+
+        # Pivot low'ları bul (fiyat ve RSI için)
+        price_pivots = self._find_pivot_lows(low, pivot_left, pivot_right)
+        rsi_pivots = self._find_pivot_lows(rsi_series.dropna(), pivot_left, pivot_right)
+
+        if len(price_pivots) < 2 or len(rsi_pivots) < 2:
+            return result
+
+        # ---- Bullish Divergence ----
+        # Son iki fiyat pivot low'u karşılaştır
+        p_prev_idx, p_prev_val = price_pivots[-2]
+        p_last_idx, p_last_val = price_pivots[-1]
+
+        # Fiyat lower low yapıyor mu?
+        price_drop_pct = (p_prev_val - p_last_val) / p_prev_val * 100
+        if p_last_val < p_prev_val and price_drop_pct >= min_price_drop:
+            # RSI'da aynı bölgedeki pivotları bul
+            # Price pivot indekslerine en yakın RSI değerlerini kullan
+            rsi_at_prev = _safe_float(rsi_series, p_prev_idx)
+            rsi_at_last = _safe_float(rsi_series, p_last_idx)
+
+            if not (math.isnan(rsi_at_prev) or math.isnan(rsi_at_last)):
+                rsi_diff = rsi_at_last - rsi_at_prev
+                # RSI higher low yapıyor mu? (fiyat düşerken RSI yükseliyor)
+                if rsi_diff >= min_rsi_diff:
+                    result["type"] = "bullish"
+                    result["strength"] = round(rsi_diff, 1)
+                    result["price_drop_pct"] = round(price_drop_pct, 2)
+                    return result
+
+        # ---- Bearish Divergence (bilgilendirme amaçlı) ----
+        # Fiyat higher high + RSI lower high
+        high = df_window["high"]
+        high_pivots = self._find_pivot_highs(high, pivot_left, pivot_right)
+
+        if len(high_pivots) >= 2:
+            h_prev_idx, h_prev_val = high_pivots[-2]
+            h_last_idx, h_last_val = high_pivots[-1]
+
+            if h_last_val > h_prev_val:
+                rsi_at_prev = _safe_float(rsi_series, h_prev_idx)
+                rsi_at_last = _safe_float(rsi_series, h_last_idx)
+
+                if not (math.isnan(rsi_at_prev) or math.isnan(rsi_at_last)):
+                    rsi_diff = rsi_at_prev - rsi_at_last
+                    if rsi_diff >= min_rsi_diff:
+                        result["type"] = "bearish"
+                        result["strength"] = round(rsi_diff, 1)
+                        return result
+
+        return result
+
+    def _find_pivot_highs(self, series: pd.Series,
+                          left: int = 5, right: int = 2) -> list:
+        """Lokal maksimumları (pivot high) tespit eder."""
+        pivots = []
+        arr = series.values
+
+        for i in range(left, len(arr) - right):
+            is_pivot = True
+            for j in range(1, left + 1):
+                if arr[i] < arr[i - j]:
+                    is_pivot = False
+                    break
+            if not is_pivot:
+                continue
+            for j in range(1, right + 1):
+                if arr[i] < arr[i + j]:
+                    is_pivot = False
+                    break
+            if is_pivot:
+                pivots.append((i, float(arr[i])))
+
+        return pivots
 
 
 # ==================== ESKİ SİSTEM UYUMLULUĞU ====================

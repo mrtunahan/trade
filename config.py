@@ -204,6 +204,30 @@ VOLUME_SPIKE = {
     "min_volume_usdt": 50_000, # Spike'ın minimum USDT hacmi (spam önleme)
 }
 
+# ==================== HACİM ONAYI (Volume Confirmation) ====================
+# Sinyal üretildiğinde hacim desteği var mı kontrol eder.
+# Hacim onaylı sinyaller daha güvenilir — pozisyon boyutuna etki eder.
+VOLUME_CONFIRM = {
+    "enabled": True,
+    "period": 20,              # Ortalama hacim periyodu (mum sayısı)
+    "confirm_ratio": 1.5,      # >= 1.5x → hacim onaylı
+    "surge_ratio": 3.0,        # >= 3.0x → hacim patlaması (güçlü onay)
+    "boost_star": True,         # Hacim surge'de yıldız boost yap
+    "penalty_below": 0.5,      # < 0.5x → düşük hacim uyarısı
+}
+
+# ==================== RSI DIVERGENCE (Uyumsuzluk Tespiti) ====================
+# Fiyat düşük dip yaparken RSI yüksek dip yaparsa → Bullish Divergence.
+# Erken dönüş sinyali. OCC sinyaliyle birleşince güçlü onay.
+RSI_DIVERGENCE = {
+    "enabled": True,
+    "lookback": 50,            # Kaç mum geriye bak (pivot arama penceresi)
+    "pivot_left": 5,           # Pivot onay: sol taraf mum sayısı
+    "pivot_right": 2,          # Pivot onay: sağ taraf (küçük = daha hızlı tepki)
+    "min_rsi_diff": 5.0,       # Minimum RSI farkı (gürültü filtresi)
+    "min_price_drop_pct": 1.0, # Minimum fiyat düşüş yüzdesi (sahte div filtresi)
+}
+
 # ==================== BİLDİRİM AYARLARI ====================
 # Her OCC renk değişiminde bildirim gönderilir
 ALERT_COOLDOWN_MINUTES = 30   # Aynı sembol+TF için cooldown
