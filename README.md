@@ -1,226 +1,218 @@
-# BinanceTR Piyasa Tarayıcı + Telegram Bildirici
+# Jarvis — Binance Futures Trading Bot & Dashboard
 
-BinanceTR üzerindeki tüm **TRY** ve **USDT** paritelerini otomatik tarayan, belirlediğiniz kriterlere uyan alım noktalarını **Telegram** üzerinden bildiren bot.
+Binance **USDT-M Perpetual Futures** piyasasını gerçek zamanlı tarayan, çok zaman dilimli OCC (Oluşum-Kesişim-Onay) sinyalleri üreten, otomatik emir açan ve tüm verileri web tabanlı bir dashboard'da sunan tam kapsamlı trading sistemi.
 
 ---
 
-## Nasıl Çalışır?
+## Mimari
 
 ```
-BinanceTR API → Tüm TRY + USDT pariteleri taranır
-    → Teknik analiz (EMA, RSI, MACD, Hacim, vs.)
-    → Kriterler sağlandı mı?
-        → Evet: Telegram bildirimi + mini grafik
-        → Hayır: Sonraki parite
-    → Döngü tekrarla (varsayılan: 60 sn)
+Binance fapi.binance.com
+        │
+        ▼
+  scanner.py  ──────────────────► MongoDB (signals)
+  (Multi-TF OCC)                       │
+                                        ▼
+  order_worker.py ◄──── MongoDB ──► Futures Emir Aç/Kapat
+  (Otomatik İşlem)                     │
+                                        ▼
+  dashboard_backend/server.js       MongoDB (positions)
+  (Express + Socket.io)                 │
+        │                               │
+        ├─ /api/binance/*  ─────────────► fapi.binance.com (proxy)
+        ├─ /api/signals/*  ─────────────► MongoDB
+        └─ /api/positions/* ────────────► MongoDB
+                │
+                ▼
+  dashboard_frontend/   (React + Vite + Tailwind)
+  http://localhost:5001
 ```
+
+---
+
+## Özellikler
+
+### Scanner (`scanner.py`)
+- Tüm USDT-M Perpetual futures paritelerini tarar (587+ coin)
+- 5 zaman diliminde (1w, 1d, 4h, 1h, 15m) OCC analizi
+- EMA, RSI, ADX, MACD, Bollinger, Hacim kriterleri
+- Sinyaller MongoDB'ye kaydedilir, Telegram'a gönderilir
+
+### Order Worker (`order_worker.py`)
+- MongoDB'deki PENDING sinyalleri işler
+- Binance Futures LONG pozisyon açar (MARKET emri)
+- Stop-Loss / Take-Profit takibi
+- PM2 ile sürekli çalışır
+
+### Dashboard (`http://localhost:5001`)
+
+| Sekme | İçerik |
+|-------|--------|
+| **Genel Bakış** | Bakiye, kullanılabilir marjin, gerçekleşmemiş PnL, 7 günlük PnL sparkline, açık pozisyonlar, açık emirler, bot işlem geçmişi |
+| **Piyasa** | 587 USDT-P coin, 3s güncellemeli anlık fiyat/değişim/hacim tablosu, arama, gainers/losers filtresi, sütun sıralaması |
+| **Chart & Emir** | Candlestick grafik (lightweight-charts) + hacim overlay, order book (10 bid/ask), sembol ve interval seçici |
+| **Sinyal Kartları** | OCC sinyal kartları (SL/TP, R:R, TF heatmap, RSI/ADX) |
+| **Canlı Log** | Socket.io üzerinden gerçek zamanlı scanner log akışı |
 
 ---
 
 ## Kurulum
 
-### 1. Gereksinimler
+### Gereksinimler
 - Python 3.9+
-- BinanceTR hesabı + API anahtarı (sadece okuma yetkisi yeterli)
-- Telegram hesabı + bot
+- Node.js 18+
+- MongoDB (yerel)
+- PM2 (`npm install -g pm2`)
+- Binance hesabı + **Futures** API anahtarı (okuma + işlem izni)
+- Telegram bot (opsiyonel)
 
-### 2. Telegram Bot Oluşturma
-
-**Bot Token:**
-1. Telegram'da [@BotFather](https://t.me/BotFather) ile konuşun
-2. `/newbot` yazın ve adımları takip edin
-3. Size verilen token'ı kaydedin
-
-**Chat ID:**
-1. Telegram'da [@userinfobot](https://t.me/userinfobot) ile konuşun
-2. `/start` yazın
-3. Size verilen ID numarasını kaydedin
-
-**Grup için kullanmak isterseniz:**
-1. Botu gruba ekleyin
-2. Grupta bir mesaj gönderin
-3. `https://api.telegram.org/bot<TOKEN>/getUpdates` adresinden chat ID'yi bulun (negatif sayı olur)
-
-### 3. Kurulum
+### 1. Python bağımlılıkları
 
 ```bash
-git clone <repo> trading-bot
-cd trading-bot
 pip install -r requirements.txt
-cp .env.example .env
-nano .env   # Token ve anahtarları girin
 ```
 
-### 4. Test
+### 2. Ortam değişkenleri
 
 ```bash
-# Telegram bağlantı testi
-python scanner.py --test
+cp .env.example .env
+nano .env
+```
 
-# Tek seferlik tarama (Telegram'a da gönderir)
-python scanner.py --once
+```env
+TELEGRAM_BOT_TOKEN=your_token
+TELEGRAM_CHAT_ID=your_chat_id
+BINANCE_API_KEY=your_futures_api_key
+BINANCE_API_SECRET=your_futures_api_secret
+```
 
-# Sürekli tarama başlat
-python scanner.py
+> **Not:** API anahtarının Binance Futures izinleri etkin olmalıdır.
+
+### 3. Backend bağımlılıkları
+
+```bash
+cd dashboard_backend && npm install
+```
+
+### 4. Frontend build
+
+```bash
+cd dashboard_frontend && npm install && npm run build
+```
+
+### 5. PM2 ile başlat
+
+```bash
+pm2 start ecosystem.config.js
+pm2 save
 ```
 
 ---
 
-## Kriter Ayarlama
+## PM2 Süreçleri
 
-`config.py` dosyasındaki `CRITERIA` sözlüğünü düzenleyerek hangi teknik indikatörlerin kullanılacağını belirleyin:
+```
+┌──────────────────────┬────────┬──────────┐
+│ name                 │ mode   │ status   │
+├──────────────────────┼────────┼──────────┤
+│ trade-scanner        │ fork   │ online   │
+│ jarvis-backend-api   │ fork   │ online   │
+│ order-worker         │ fork   │ online   │
+└──────────────────────┴────────┴──────────┘
+```
+
+```bash
+pm2 list                        # Durum
+pm2 logs trade-scanner          # Scanner logları
+pm2 logs jarvis-backend-api     # API logları
+pm2 restart all                 # Tümünü yeniden başlat
+```
+
+---
+
+## Yapılandırma (`config.py`)
+
+| Parametre | Açıklama | Varsayılan |
+|-----------|----------|------------|
+| `BINANCE_BASE_URL` | Futures API endpoint | `https://fapi.binance.com` |
+| `ONLY_USDT` | Sadece USDT-M perpetual tara | `True` |
+| `MIN_VOLUME_USDT` | Minimum 24s hacim | `1,000,000 USDT` |
+| `SCAN_INTERVAL` | Tarama aralığı | `900s` |
+| `KLINE_TIMEFRAMES` | Analiz zaman dilimleri | `1w, 1d, 4h, 1h, 15m` |
+| `MIN_SCORE` | Minimum OCC puan eşiği | `5` |
+| `ALERT_COOLDOWN_MINUTES` | Tekrar sinyal süresi | `30 dk` |
+
+### Order Worker yapılandırması (`order_worker.py`)
 
 ```python
-CRITERIA = {
-    "ema_cross": {
-        "enabled": True,       # Aç / kapat
-        "fast": 9,             # Hızlı EMA periyodu
-        "slow": 21,            # Yavaş EMA periyodu
-    },
-    "rsi": {
-        "enabled": True,
-        "period": 14,
-        "oversold": 30,        # Aşırı satım eşiği
-        "overbought": 70,
-    },
-    "macd": {
-        "enabled": True,
-        "fast": 12,
-        "slow": 26,
-        "signal": 9,
-    },
-    # ... diğer kriterler
+TRADE_CONFIG = {
+    "enabled": True,                    # Canlı işlem modu
+    "max_budget_per_trade_usdt": 50.0,  # İşlem başına bütçe
+    "leverage": 5,                      # Kaldıraç
+    "min_quantity": 0.001,
+    "poll_interval": 30,                # Sinyal kontrol sıklığı (s)
+    "track_interval": 60,               # Pozisyon takip sıklığı (s)
 }
-
-# Kaç kriter aynı anda sağlanmalı
-MIN_CRITERIA_MET = 2
-```
-
-### Mevcut Kriterler
-
-| Kriter | Açıklama | Varsayılan |
-|--------|----------|-----------|
-| `ema_cross` | EMA kesişim (hızlı yavaşı yukarı kesiyor) | Açık |
-| `rsi` | RSI aşırı satım bölgesinde | Açık |
-| `macd` | MACD sinyal kesişimi veya histogram dönüşü | Açık |
-| `bollinger` | Fiyat alt Bollinger bandına temas | Kapalı |
-| `volume_spike` | Hacim ortalamanın X katına çıkmış | Açık |
-| `trend_filter` | Fiyat 200 EMA'nın üstünde | Açık |
-| `support_resistance` | Destek seviyesine yakınlık | Kapalı |
-| `stoch_rsi` | Stochastic RSI aşırı satımda kesişim | Kapalı |
-
-### Örnek Stratejiler
-
-**Agresif (daha çok sinyal):**
-```python
-MIN_CRITERIA_MET = 2
-# EMA cross + Volume spike yeterli
-```
-
-**Konservatif (daha az ama güçlü sinyal):**
-```python
-MIN_CRITERIA_MET = 4
-# EMA + RSI + MACD + Trend hepsi sağlanmalı
 ```
 
 ---
 
-## Bildirim Formatı
-
-Telegram'a gelen örnek bildirim:
+## API Endpoint'leri
 
 ```
-🔥🔥 ALIM SİNYALİ - BTC/TRY
-━━━━━━━━━━━━━━━━━━━━━
+GET /api/binance/balance          Hesap bakiyesi (USDT)
+GET /api/binance/positions        Açık futures pozisyonlar
+GET /api/binance/open-orders      Açık emirler
+GET /api/binance/income           Son 7 günlük gerçekleşen PnL
+GET /api/binance/all-tickers      Tüm USDT-P ticker'ları (587 coin)
+GET /api/binance/klines           Mum verisi
+GET /api/binance/orderbook        Order book (20 seviye)
+GET /api/binance/ticker           Tek coin 24s ticker
+GET /api/binance/trade-history    İşlem geçmişi
 
-💰 Fiyat: 2,150,000.0000 TRY
-📊 Güç: Güçlü (3/5)
-📉 RSI: 28.4
-📈 24s Değişim: +2.35%
-
-Kriterler:
-  ✅ EMA Kesişim: EMA yukarı kesişim
-  ✅ RSI: RSI Aşırı satım
-  ✅ Hacim Artışı: Hacim patlaması (2.4x)
-  ❌ MACD: Sinyal yok
-  ❌ Trend Filtresi: Trend düşüş
-
-━━━━━━━━━━━━━━━━━━━━━
-🕐 2026-03-15 14:30:00
-🔗 TradingView
+GET /api/signals/recent           Son sinyaller (MongoDB)
+GET /api/signals/pending          Bekleyen sinyaller
+GET /api/positions/open           Açık bot pozisyonları
+GET /api/positions/history        Kapalı pozisyon geçmişi
+GET /api/stats                    Genel istatistikler
+GET /api/health                   Sağlık kontrolü
 ```
-
-+ Mini grafik görseli (fiyat + EMA + RSI + hacim)
-
----
-
-## Yapılandırma Referansı
-
-| Ayar | Açıklama | Varsayılan |
-|------|----------|-----------|
-| `SCAN_INTERVAL` | Tarama aralığı (saniye) | 60 |
-| `KLINE_INTERVAL` | Mum zaman dilimi | 1h |
-| `PAIR_MODE` | "auto" veya "manual" | auto |
-| `MIN_VOLUME_USDT` | Minimum 24s hacim (USDT) | 100,000 |
-| `ALERT_COOLDOWN_MINUTES` | Tekrar bildirim süresi | 60 |
-| `SEND_CHART_IMAGE` | Grafik görseli gönder | True |
-| `DAILY_SUMMARY_HOUR` | Günlük özet saati | 21 |
-| `MIN_CRITERIA_MET` | Minimum kriter sayısı | 2 |
 
 ---
 
 ## Dosya Yapısı
 
 ```
-trading-bot/
-├── scanner.py             # Ana tarayıcı (çalıştırılan dosya)
-├── market_data.py         # BinanceTR veri çekici
-├── analyzer.py            # Teknik analiz motoru
-├── telegram_notifier.py   # Telegram bildirim modülü
-├── chart_gen.py           # Mini grafik oluşturucu
-├── config.py              # Tüm ayarlar
-├── requirements.txt       # Python bağımlılıkları
-├── .env.example           # Gizli anahtar şablonu
-└── README.md              # Bu dosya
-```
-
----
-
-## Arka Planda Çalıştırma
-
-```bash
-# systemd servisi olarak (önerilen)
-sudo nano /etc/systemd/system/scanner-bot.service
-```
-
-```ini
-[Unit]
-Description=BinanceTR Scanner Bot
-After=network.target
-
-[Service]
-Type=simple
-User=botuser
-WorkingDirectory=/home/botuser/trading-bot
-ExecStart=/usr/bin/python3 scanner.py
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl enable scanner-bot
-sudo systemctl start scanner-bot
-sudo journalctl -u scanner-bot -f   # Logları takip et
+trade/
+├── scanner.py                # Multi-TF OCC tarayıcı
+├── market_data.py            # Binance Futures API istemcisi
+├── order_worker.py           # Otomatik emir motoru
+├── analyzer.py               # Teknik analiz (EMA, RSI, ADX...)
+├── config.py                 # Tüm yapılandırma sabitleri
+├── telegram_notifier.py      # Telegram bildirim modülü
+├── chart_gen.py              # Grafik oluşturucu
+├── ecosystem.config.js       # PM2 çoklu süreç yapılandırması
+├── requirements.txt
+├── .env.example
+│
+├── dashboard_backend/
+│   ├── server.js             # Express API + Socket.io
+│   └── package.json
+│
+└── dashboard_frontend/
+    ├── src/
+    │   ├── App.jsx           # Ana dashboard bileşeni
+    │   ├── main.jsx
+    │   └── index.css
+    ├── vite.config.js
+    └── package.json
 ```
 
 ---
 
 ## Önemli Uyarılar
 
-- Bu bot **finansal tavsiye vermez**, sadece teknik analiz sinyallerini bildirir.
-- Tüm yatırım kararları **sizin sorumluluğunuzdadır**.
-- API anahtarınıza **sadece okuma yetkisi** verin, işlem yetkisi vermeyin.
-- Bot sinyalleri **garanti değildir**, her zaman kendi araştırmanızı yapın.
+- Bu sistem **finansal tavsiye vermez**, teknik analiz sinyalleri üretir.
+- Kaldıraçlı işlemler yüksek risk içerir. Tüm yatırım kararları **sizin sorumluluğunuzdadır**.
+- `order_worker.py` içindeki `"enabled": True` ile **canlı emir açılır**. Test için `False` yapın.
+- API anahtarınızı `.env` dışında **asla paylaşmayın**.
