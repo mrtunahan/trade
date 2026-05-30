@@ -157,6 +157,30 @@ app.get('/api/binance/ticker', async (req, res) => {
     }
 });
 
+// ─── Tüm USDT-P Coin'leri ─────────────────────────────────────────────────
+app.get('/api/binance/all-tickers', async (req, res) => {
+    try {
+        const data = await fapiPublic('/fapi/v1/ticker/24hr');
+        const usdt = data
+            .filter(t => t.symbol.endsWith('USDT'))
+            .map(t => ({
+                symbol:         t.symbol,
+                lastPrice:      parseFloat(t.lastPrice),
+                priceChange:    parseFloat(t.priceChange),
+                priceChangePct: parseFloat(t.priceChangePercent),
+                highPrice:      parseFloat(t.highPrice),
+                lowPrice:       parseFloat(t.lowPrice),
+                volume:         parseFloat(t.volume),
+                quoteVolume:    parseFloat(t.quoteVolume),
+                count:          parseInt(t.count || 0),
+            }))
+            .sort((a, b) => b.quoteVolume - a.quoteVolume);
+        res.json(usdt);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // ==================== MONGODB BAĞLANTISI ====================
 mongoose.connect('mongodb://localhost:27017/trade_bot')
     .then(() => console.log('✅ Dashboard Backend MongoDB bağlantısı başarılı.'))

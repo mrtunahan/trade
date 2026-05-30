@@ -8,6 +8,7 @@ import { AreaChart, Area, ResponsiveContainer, Tooltip as ReTooltip, XAxis } fro
 import {
   Terminal, Activity, Briefcase, History, TrendingUp, Wifi, WifiOff,
   Zap, DollarSign, BarChart2, BookOpen, RefreshCw, ChevronDown,
+  Globe, Search, ArrowUp, ArrowDown,
 } from 'lucide-react';
 
 const API_URL = 'http://localhost:5001';
@@ -291,6 +292,12 @@ export default function App() {
   const [history,        setHistory]        = useState([]);
   const [stats,          setStats]          = useState({ totalSignals:0, pendingSignals:0, executedSignals:0, openPositions:0, closedPositions:0 });
 
+  // Piyasa sekmesi
+  const [allTickers,     setAllTickers]     = useState([]);
+  const [mkSearch,       setMkSearch]       = useState('');
+  const [mkFilter,       setMkFilter]       = useState('all');  // all | gainers | losers
+  const [mkSort,         setMkSort]         = useState({ col: 'quoteVolume', dir: -1 });
+
   const logEndRef = useRef(null);
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior:'smooth' }); }, [logs]);
 
@@ -319,6 +326,19 @@ export default function App() {
     return () => { clearInterval(t); ['connect','disconnect','log_init','log_stream'].forEach(e=>socket.off(e)); };
   }, [fetchAll]);
 
+  // Piyasa sekmesi polling — sadece market tabı aktifken
+  useEffect(() => {
+    if (activeTab !== 'market') return;
+    const load = () =>
+      fetch(`${API_URL}/api/binance/all-tickers`)
+        .then(r => r.json())
+        .then(d => Array.isArray(d) ? setAllTickers(d) : null)
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, [activeTab]);
+
   const logColor = l => {
     if (l.includes('ALIM') || l.includes('✅') || l.includes('💾')) return 'text-green-400';
     if (l.includes('ERROR') || l.includes('❌')) return 'text-red-400';
@@ -330,9 +350,25 @@ export default function App() {
   // ─ Hesaplanan değerler ────────────────────────────────────────────────────
   const pnlColor = v => v > 0 ? 'text-green-400' : v < 0 ? 'text-red-400' : 'text-gray-400';
 
+  // ─ Piyasa yardımcıları ────────────────────────────────────────────────────
+  const mkSortFn = (col) => {
+    setMkSort(prev => ({ col, dir: prev.col === col ? -prev.dir : -1 }));
+  };
+  const mkFiltered = allTickers
+    .filter(t => {
+      if (mkSearch) return t.symbol.toLowerCase().includes(mkSearch.toLowerCase());
+      if (mkFilter === 'gainers') return t.priceChangePct > 0;
+      if (mkFilter === 'losers')  return t.priceChangePct < 0;
+      return true;
+    })
+    .sort((a, b) => mkSort.dir * (b[mkSort.col] - a[mkSort.col]));
+  const gainersCount = allTickers.filter(t => t.priceChangePct > 0).length;
+  const losersCount  = allTickers.filter(t => t.priceChangePct < 0).length;
+
   // ─ Sekmeler ──────────────────────────────────────────────────────────────
   const TABS = [
     { id:'overview', label:'Genel Bakış',    icon: Activity  },
+    { id:'market',   label:'Piyasa',         icon: Globe     },
     { id:'chart',    label:'Chart & Emir',   icon: BarChart2 },
     { id:'scanner',  label:'Sinyal Kartları',icon: Zap       },
     { id:'log',      label:'Canlı Log',      icon: Terminal  },
@@ -559,6 +595,121 @@ export default function App() {
               <OrderBook symbol={chartSymbol} />
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ════════════════ PİYASA SEKMESİ ════════════════ */}
+      {activeTab === 'market' && (
+        <div className="bg-gray-900 border border-cyan-900 rounded-lg p-4 space-y-3">
+
+          {/* Özet istatistikler */}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="bg-gray-800 rounded-lg p-3 text-center">
+              <div className="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Toplam Parite</div>
+              <div className="text-xl font-bold text-cyan-300">{allTickers.length}</div>
+              <div className="text-[10px] text-gray-500">USDT-M Perpetual</div>
+            </div>
+            <div className="bg-green-950 border border-green-900 rounded-lg p-3 text-center">
+              <div className="text-[10px] text-green-600 uppercase tracking-widest mb-1">Yükselen</div>
+              <div className="text-xl font-bold text-green-400">{gainersCount}</div>
+              <div className="text-[10px] text-green-700">{allTickers.length ? Math.round(gainersCount/allTickers.length*100) : 0}% coin</div>
+            </div>
+            <div className="bg-red-950 border border-red-900 rounded-lg p-3 text-center">
+              <div className="text-[10px] text-red-700 uppercase tracking-widest mb-1">Düşen</div>
+              <div className="text-xl font-bold text-red-400">{losersCount}</div>
+              <div className="text-[10px] text-red-800">{allTickers.length ? Math.round(losersCount/allTickers.length*100) : 0}% coin</div>
+            </div>
+          </div>
+
+          {/* Arama + Filtre */}
+          <div className="flex gap-2 flex-wrap items-center">
+            <div className="relative">
+              <Search size={12} className="absolute left-2.5 top-2 text-gray-500" />
+              <input
+                type="text"
+                placeholder="BTC, ETH, SOL..."
+                value={mkSearch}
+                onChange={e => { setMkSearch(e.target.value); setMkFilter('all'); }}
+                className="bg-gray-800 border border-gray-700 text-cyan-300 text-xs rounded pl-7 pr-3 py-1.5 w-44 focus:border-cyan-600 outline-none"
+              />
+            </div>
+            {['all','gainers','losers'].map(f => (
+              <button key={f} onClick={() => { setMkFilter(f); setMkSearch(''); }}
+                className={`px-3 py-1.5 text-[11px] rounded border font-bold transition-colors ${
+                  mkFilter===f && !mkSearch
+                    ? f==='gainers' ? 'bg-green-950 border-green-700 text-green-400'
+                      : f==='losers' ? 'bg-red-950 border-red-800 text-red-400'
+                      : 'bg-cyan-950 border-cyan-700 text-cyan-300'
+                    : 'border-gray-700 text-gray-500 hover:border-gray-600'
+                }`}>
+                {f==='all' ? 'Tümü' : f==='gainers' ? '▲ Yükselen' : '▼ Düşen'}
+              </button>
+            ))}
+            <span className="ml-auto text-[10px] text-gray-600">{mkFiltered.length} sonuç · 3s güncelleme</span>
+          </div>
+
+          {/* Tablo */}
+          {allTickers.length === 0
+            ? <p className="text-xs text-gray-600 text-center py-10">Veriler yükleniyor…</p>
+            : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-gray-500 border-b border-gray-800 text-[10px] sticky top-0 bg-gray-900">
+                      <th className="text-left py-2 pr-2 w-6">#</th>
+                      <th className="text-left pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('symbol')}>
+                        PARİTE {mkSort.col==='symbol' ? (mkSort.dir===1 ? <ArrowUp size={9} className="inline"/> : <ArrowDown size={9} className="inline"/>) : null}
+                      </th>
+                      <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('lastPrice')}>
+                        FİYAT {mkSort.col==='lastPrice' ? (mkSort.dir===1 ? <ArrowUp size={9} className="inline"/> : <ArrowDown size={9} className="inline"/>) : null}
+                      </th>
+                      <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('priceChangePct')}>
+                        24s % {mkSort.col==='priceChangePct' ? (mkSort.dir===1 ? <ArrowUp size={9} className="inline"/> : <ArrowDown size={9} className="inline"/>) : null}
+                      </th>
+                      <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('highPrice')}>
+                        24s YÜKSEK
+                      </th>
+                      <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('lowPrice')}>
+                        24s DÜŞÜK
+                      </th>
+                      <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('quoteVolume')}>
+                        HACİM (M$) {mkSort.col==='quoteVolume' ? (mkSort.dir===1 ? <ArrowUp size={9} className="inline"/> : <ArrowDown size={9} className="inline"/>) : null}
+                      </th>
+                      <th className="text-right cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('count')}>
+                        İŞLEM
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {mkFiltered.slice(0, 300).map((t, i) => {
+                      const isPos = t.priceChangePct >= 0;
+                      const priceDec = t.lastPrice >= 1000 ? 2 : t.lastPrice >= 1 ? 4 : 6;
+                      return (
+                        <tr key={t.symbol}
+                          className="border-b border-gray-800 hover:bg-gray-800 cursor-pointer"
+                          onClick={() => { setChartSymbol(t.symbol); setActiveTab('chart'); }}>
+                          <td className="py-1.5 pr-2 text-gray-600">{i+1}</td>
+                          <td className="pr-3 font-bold text-white">
+                            {t.symbol.replace('USDT','')}
+                            <span className="text-gray-600 font-normal">/USDT</span>
+                          </td>
+                          <td className="text-right pr-3 font-mono text-cyan-200">{t.lastPrice.toFixed(priceDec)}</td>
+                          <td className={`text-right pr-3 font-bold ${isPos ? 'text-green-400' : 'text-red-400'}`}>
+                            <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] ${isPos ? 'bg-green-950' : 'bg-red-950'}`}>
+                              {isPos ? '+' : ''}{t.priceChangePct.toFixed(2)}%
+                            </span>
+                          </td>
+                          <td className="text-right pr-3 text-green-600 font-mono">{t.highPrice.toFixed(priceDec)}</td>
+                          <td className="text-right pr-3 text-red-700 font-mono">{t.lowPrice.toFixed(priceDec)}</td>
+                          <td className="text-right pr-3 text-yellow-500">{(t.quoteVolume/1e6).toFixed(1)}M</td>
+                          <td className="text-right text-gray-500">{t.count >= 1000 ? (t.count/1000).toFixed(0)+'K' : t.count}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
         </div>
       )}
 
