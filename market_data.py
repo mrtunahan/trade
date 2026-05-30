@@ -34,11 +34,130 @@ class MarketData:
 
     def __init__(self):
         self.base_url = BINANCE_BASE_URL
+        self.api_key = BINANCE_API_KEY
+        self.api_secret = BINANCE_API_SECRET
         self.session = requests.Session()
-        self.session.headers.update({"X-MBX-APIKEY": BINANCE_API_KEY})
+        self.session.headers.update({"X-MBX-APIKEY": self.api_key})
+
+        # Connection pool boyutunu paralel taramaya uygun ayarla
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=30,
+            pool_maxsize=30,
+        )
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
         self._symbol_cache = {}
         self._usdt_try_rate = None
         self._rate_ts = 0
+
+    # ==================== GÜVENLİK VE İMZA (SIGNATURE) ====================
+
+    def _generate_signature(self, query_string: str) -> str:
+        """BinanceTR API güvenli istekleri için HMAC-SHA256 imzası üretir."""
+        return hmac.new(
+            self.api_secret.encode("utf-8"),
+            query_string.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _send_signed_request(self, method: str, endpoint: str, params: dict = None) -> Optional[dict]:
+        """İmzalı özel API isteklerini (Bakiye, Emir vb.) BinanceTR'ye iletir."""
+        if params is None:
+            params = {}
+
+        params["timestamp"] = int(time.time() * 1000)
+        query_string = urlencode(params)
+        signature = self._generate_signature(query_string)
+
+        url = f"{self.base_url}{endpoint}?{query_string}&signature={signature}"
+
+        try:
+            if method.upper() == "GET":
+                resp = self.session.get(url, timeout=15)
+            elif method.upper() == "POST":
+                resp = self.session.post(url, timeout=15)
+            elif method.upper() == "DELETE":
+                resp = self.session.delete(url, timeout=15)
+            else:
+                return None
+
+            if resp.status_code != 200:
+                logger.error(f"BinanceTR İmzalı İstek Hatası ({endpoint}): {resp.text}")
+                return None
+            return resp.json()
+        except Exception as e:
+            logger.error(f"BinanceTR Bağlantı Hatası ({endpoint}): {e}")
+            return None
+
+    # ==================== CÜZDAN VE BAKİYE BİLGİLERİ ====================
+
+    def get_asset_balances(self) -> dict:
+        """
+        Hesaptaki tüm varlıkların bakiyelerini çeker.
+        Returns: {"TRY": {"free": 1500.0, "locked": 0.0}, "BTC": {...}}
+        """
+        data = self._send_signed_request("GET", "/api/v3/account")
+        balances = {}
+        if data and "balances" in data:
+            for asset in data["balances"]:
+                balances[asset["asset"]] = {
+                    "free": float(asset["free"]),
+                    "locked": float(asset["locked"]),
+                }
+        return balances
+
+    def get_available_balance(self, asset: str) -> float:
+        """Belirli bir varlığın (örn: 'TRY' veya 'USDT') kullanılabilir bakiyesini döner."""
+        balances = self.get_asset_balances()
+        return balances.get(asset, {}).get("free", 0.0)
+
+    # ==================== EMİR YÖNETİMİ (ALIM / SATIM) ====================
+
+    def create_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: float,
+        price: Optional[float] = None,
+    ) -> Optional[dict]:
+        """
+        BinanceTR üzerinde Alım veya Satım emri oluşturur.
+
+        Args:
+            symbol:     Parite adı (örn: "BTCTRY")
+            side:       "BUY" veya "SELL"
+            order_type: "MARKET" veya "LIMIT"
+            quantity:   Alınacak/Satılacak coin miktarı (base asset)
+            price:      LIMIT emirler için hedef fiyat; MARKET'te None olmalı.
+        """
+        params = {
+            "symbol": symbol,
+            "side": side.upper(),
+            "type": order_type.upper(),
+            "quantity": f"{quantity:.6f}",
+        }
+
+        if order_type.upper() == "LIMIT":
+            if price is None:
+                logger.error("LIMIT emir türü için 'price' parametresi zorunludur!")
+                return None
+            params["price"] = f"{price:.4f}"
+            params["timeInForce"] = "GTC"
+
+        logger.info(f"Emir Gönderiliyor -> {symbol} | {side} | {order_type} | Miktar: {quantity}")
+        return self._send_signed_request("POST", "/api/v3/order", params)
+
+    def cancel_order(self, symbol: str, order_id: int) -> Optional[dict]:
+        """Açık bir emri ID numarası ile iptal eder."""
+        params = {"symbol": symbol, "orderId": order_id}
+        return self._send_signed_request("DELETE", "/api/v3/order", params)
+
+    def get_order_status(self, symbol: str, order_id: int) -> Optional[dict]:
+        """Verilen bir emrin güncel durumunu (FILLED, NEW, CANCELED vb.) sorgular."""
+        params = {"symbol": symbol, "orderId": order_id}
+        return self._send_signed_request("GET", "/api/v3/order", params)
 
     # ==================== PARİTE KEŞF ====================
 

@@ -207,6 +207,21 @@ SEND_CHART_IMAGE = True
 DAILY_SUMMARY_HOUR = 21
 NOTIFY_ALL_TF_CHANGES = False  # Kapalı: yüzlerce renk değişimi spam yapıyordu
 
+# ==================== HACİM SPIKE ALGILAMA ====================
+VOLUME_SPIKE = {
+    "enabled": False,           # Aktif etmek için True yapın
+    "lookback_bars": 20,        # Ortalama hesaplama için önceki bar sayısı
+    "multiplier": 5.0,          # Mevcut hacim / ortalama hacim > bu değer ise spike
+    "min_volume_usdt": 50_000,  # Spike bildirimi için minimum hacim (USDT)
+    "cooldown_minutes": 60,     # Aynı sembol için spike cooldown süresi
+}
+
+# Sinyal üretilmemesi gereken stablecoin ve benzeri çiftler
+STABLECOIN_BLACKLIST = {
+    "BUSDTRY", "USDTTRY", "USDCTRY", "TUSDTRY", "DAITRY",
+    "BUSDUSDT", "USDCUSDT", "TUSDUSDT", "DAIUSDT",
+}
+
 # ==================== LOGLAMA ====================
 LOG_FILE  = "scanner.log"
 LOG_LEVEL = "INFO"

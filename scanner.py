@@ -12,6 +12,9 @@ import signal
 import logging
 from datetime import datetime, timedelta
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from pymongo import MongoClient
 
 from config import (
     SCAN_INTERVAL,
@@ -24,6 +27,8 @@ from config import (
     OCC_MIN_SCORE,
     ONLY_TRY,
     NOTIFY_ALL_TF_CHANGES,
+    VOLUME_SPIKE,
+    STABLECOIN_BLACKLIST,
 )
 from market_data import MarketData
 from analyzer import MultiTfOccAnalyzer
@@ -52,12 +57,23 @@ logger = logging.getLogger("Scanner")
 
 
 class Scanner:
-    """Hiyerarşik multi-TF OCC tarayıcı."""
+    """Hiyerarşik multi-TF OCC tarayıcı ve veri kaydedici."""
 
     def __init__(self):
         self.market = MarketData()
         self.analyzer = MultiTfOccAnalyzer()
         self.telegram = TelegramNotifier()
+
+        # ---- LOKAL MONGODB BAĞLANTISI ----
+        try:
+            self.db_client = MongoClient("mongodb://localhost:27017/", serverSelectionTimeoutMS=3000)
+            self.db_client.server_info()
+            self.db = self.db_client["trade_bot"]
+            self.signals_collection = self.db["signals"]
+            logger.info("✅ Lokal MongoDB bağlantısı başarıyla kuruldu (Database: trade_bot).")
+        except Exception as e:
+            logger.critical(f"❌ Lokal MongoDB'ye bağlanılamadı! MongoDB servisinin çalıştığından emin olun: {e}")
+            sys.exit(1)
 
         # Cooldown takibi: {(symbol, timeframe): last_alert_time}
         self.alert_cooldowns = {}
@@ -81,6 +97,11 @@ class Scanner:
     def _shutdown(self, signum, frame):
         logger.info("Kapatılıyor...")
         self.running = False
+        try:
+            self.db_client.close()
+            logger.info("MongoDB bağlantısı kapatıldı.")
+        except Exception:
+            pass
 
     # ==================== PARİTE YÖNETİMİ ====================
 
@@ -128,121 +149,223 @@ class Scanner:
 
     # ==================== TF VERİ ÇEKME ====================
 
+    # Cache süreleri (saniye): üst TF'ler daha uzun cache
+    CACHE_TTL = {
+        "1w": 3600, "1d": 1800, "4h": 600, "1h": 300, "15m": 60,
+    }
+
     def _get_tf_data(self, symbol: str) -> dict:
         """
-        Bir sembol için tüm 5 timeframe'in mum verisini çeker.
+        Bir sembol için tüm 5 timeframe'in mum verisini paralel olarak çeker.
         Cache kullanır (TF'ye göre farklı cache süreleri).
         Returns: {timeframe: DataFrame}
         """
         now = time.time()
         tf_data = {}
-
-        # Cache süreleri (saniye): üst TF'ler daha uzun cache
-        cache_ttl = {
-            "1w": 3600,   # 1 saat
-            "1d": 1800,   # 30 dk
-            "4h": 600,    # 10 dk
-            "1h": 300,    # 5 dk
-            "15m": 60,    # 1 dk
-        }
+        to_fetch = []
 
         for tf, (weight, limit, label) in OCC_TIMEFRAMES.items():
             cache_key = (symbol, tf)
             cached = self._tf_cache.get(cache_key)
-            ttl = cache_ttl.get(tf, 300)
+            ttl = self.CACHE_TTL.get(tf, 300)
 
             if cached and (now - cached[1]) < ttl:
                 tf_data[tf] = cached[0]
                 continue
 
-            # API'den çek
-            df = self.market.get_klines(symbol, interval=tf, limit=limit)
-            if df is not None and len(df) >= 30:
-                self._tf_cache[cache_key] = (df, now)
-                tf_data[tf] = df
+            to_fetch.append((tf, limit))
 
-            # Rate limit
-            time.sleep(0.2)
+        if to_fetch:
+            with ThreadPoolExecutor(max_workers=len(to_fetch)) as ex:
+                futures = {
+                    ex.submit(self.market.get_klines, symbol, tf, limit): (tf, limit)
+                    for tf, limit in to_fetch
+                }
+                for future in as_completed(futures):
+                    try:
+                        df = future.result()
+                        tf, _ = futures[future]
+                        if df is not None and len(df) >= 30:
+                            self._tf_cache[(symbol, tf)] = (df, now)
+                            tf_data[tf] = df
+                    except Exception as e:
+                        tf, _ = futures[future]
+                        logger.warning(f"{symbol} {tf} paralel çekim hatası: {e}")
 
         return tf_data
+
+    # ==================== HACİM SPIKE TESPİTİ ====================
+
+    def _check_volume_spike(self, symbol: str, tf_data: dict) -> bool:
+        if not VOLUME_SPIKE.get("enabled", False):
+            return False
+
+        df_15m = tf_data.get("15m")
+        lookback = VOLUME_SPIKE.get("lookback_bars", 20)
+        if df_15m is None or len(df_15m) < lookback + 1:
+            return False
+
+        if self._is_on_cooldown(symbol, "volume_spike"):
+            return False
+
+        multiplier = VOLUME_SPIKE.get("multiplier", 5.0)
+        min_vol = VOLUME_SPIKE.get("min_volume_usdt", 50_000)
+        current_vol = float(df_15m["quote_volume"].iloc[-1])
+        avg_vol = float(df_15m["quote_volume"].iloc[-lookback - 1:-1].mean())
+
+        if avg_vol <= 0:
+            return False
+
+        ratio = current_vol / avg_vol
+        if ratio >= multiplier and current_vol >= min_vol:
+            price = float(df_15m["close"].iloc[-1])
+            logger.info(f"🚨 HACİM SPIKE: {symbol} | Hacim: {current_vol:,.0f} ({ratio:.1f}x ortalama)")
+            self._send_volume_spike_alert(symbol, price, current_vol, avg_vol, ratio)
+            self.alert_cooldowns[(symbol, "volume_spike")] = datetime.now()
+            return True
+
+        return False
+
+    def _send_volume_spike_alert(self, symbol: str, price: float, current_vol: float, avg_vol: float, ratio: float):
+        quote = "TRY" if symbol.endswith("TRY") else "USDT"
+        base = symbol.replace("TRY", "").replace("USDT", "")
+        message = (
+            f"🚨 <b>ANORMAL HACİM — {base}/{quote}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 <b>15dk Hacim:</b> {current_vol:,.0f} {quote}\n"
+            f"📈 <b>24s Ortalama:</b> {avg_vol:,.0f} {quote}\n"
+            f"⚡ <b>Oran:</b> {ratio:.1f}x (>{VOLUME_SPIKE.get('multiplier', 5)}x eşik)\n\n"
+            f"💰 <b>Fiyat:</b> {price:,.4f} {quote}\n\n"
+            f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        self.telegram.send_message(message)
+
+    # ==================== TEKİL PARİTE TARAMA ====================
+
+    PAIR_BATCH_SIZE = 5
+    BATCH_SLEEP = 0.5
+
+    def _scan_single_pair(self, symbol: str) -> dict:
+        result = {"symbol": symbol, "signal": None, "changes": [], "spike": False, "ok": False}
+        try:
+            tf_data = self._get_tf_data(symbol)
+            if not tf_data:
+                return result
+
+            result["ok"] = True
+            result["spike"] = self._check_volume_spike(symbol, tf_data)
+
+            if NOTIFY_ALL_TF_CHANGES:
+                result["changes"] = self.analyzer.check_tf_changes(symbol, tf_data)
+
+            signal = self.analyzer.analyze_multi_tf(symbol, tf_data)
+            if signal and signal.is_valid_entry:
+                if SEND_CHART_IMAGE:
+                    df_15m = tf_data.get("15m")
+                    if df_15m is not None:
+                        signal._chart_bytes = generate_signal_chart(symbol, df_15m, signal.indicators)
+                result["signal"] = signal
+
+        except Exception as e:
+            logger.error(f"{symbol} tarama hatası: {e}")
+
+        return result
 
     # ==================== TARAMA DÖNGÜSÜ ====================
 
     def scan_once(self) -> list:
-        """Tüm pariteleri bir kez tarar."""
+        """Tüm pariteleri batch halinde paralel tarar; sinyalleri MongoDB'ye kaydeder."""
         pairs = self.refresh_pairs()
+        # Stablecoin filtresi
+        pairs = [p for p in pairs if p not in STABLECOIN_BLACKLIST]
         signals_found = []
         scanned = 0
-        errors = 0
 
         logger.info(f"Tarama başlıyor: {len(pairs)} parite, {len(OCC_TIMEFRAMES)} TF...")
 
-        for i, symbol in enumerate(pairs):
+        for batch_start in range(0, len(pairs), self.PAIR_BATCH_SIZE):
             if not self.running:
                 break
 
-            try:
-                # 5 TF verisi çek
-                tf_data = self._get_tf_data(symbol)
-                if not tf_data:
-                    continue
+            batch = pairs[batch_start:batch_start + self.PAIR_BATCH_SIZE]
 
-                scanned += 1
+            with ThreadPoolExecutor(max_workers=self.PAIR_BATCH_SIZE) as executor:
+                futures = {executor.submit(self._scan_single_pair, sym): sym for sym in batch}
+                for future in as_completed(futures):
+                    result = future.result()
+                    symbol = result["symbol"]
 
-                # 1. Her TF'deki renk değişimlerini kontrol et
-                if NOTIFY_ALL_TF_CHANGES:
-                    changes = self.analyzer.check_tf_changes(symbol, tf_data)
-                    for change in changes:
+                    if not result["ok"]:
+                        continue
+
+                    scanned += 1
+
+                    # Renk değişimi bildirimleri
+                    for change in result["changes"]:
                         tf_status = change.tf_statuses[0]
                         cooldown_key = f"{tf_status.timeframe}_change"
                         if not self._is_on_cooldown(symbol, cooldown_key):
-                            logger.info(
-                                f"🔔 RENK DEĞİŞİMİ: {symbol} | "
-                                f"{tf_status.label} ({tf_status.timeframe}) → "
-                                f"{'🟢 YEŞİL' if tf_status.is_green else '🔴 KIRMIZI'}"
-                            )
                             success = self.telegram.send_tf_change(symbol, tf_status, change.price)
                             if success:
                                 self._set_cooldown(symbol, cooldown_key)
 
-                # 2. Multi-TF analiz (ALIM sinyali kontrolü)
-                signal = self.analyzer.analyze_multi_tf(symbol, tf_data)
-                if signal and signal.is_valid_entry:
-                    if not self._is_on_cooldown(symbol, "entry"):
-                        logger.info(
-                            f"🔔 ALIM SİNYALİ: {symbol} | "
-                            f"Puan: {signal.total_score}/{signal.max_score} | "
-                            f"RSI: {signal.rsi_value:.1f} ({signal.rsi_quality}) | "
-                            f"ADX: {signal.adx_value:.1f} ({signal.adx_regime})"
-                        )
+                    # ---- ALIM SİNYALİ VE MONGODB ENTEGRASYONU ----
+                    signal_obj = result["signal"]
+                    if signal_obj and not self._is_on_cooldown(symbol, "entry"):
+                        logger.info(f"🔔 ALIM SİNYALİ: {symbol} | Puan: {signal_obj.total_score}/{signal_obj.max_score}")
 
-                        chart_bytes = None
-                        if SEND_CHART_IMAGE:
-                            df_15m = tf_data.get("15m")
-                            if df_15m is not None:
-                                chart_bytes = generate_signal_chart(
-                                    symbol, df_15m, signal.indicators
-                                )
+                        # 1. MongoDB'ye kaydet (Order Worker için)
+                        try:
+                            star_info = signal_obj.signal_star_rating
+                            signal_doc = {
+                                "symbol": signal_obj.symbol,
+                                "price": float(signal_obj.price),
+                                "total_score": int(signal_obj.total_score),
+                                "max_score": int(signal_obj.max_score),
+                                "rsi_value": float(signal_obj.rsi_value) if signal_obj.rsi_value == signal_obj.rsi_value else None,
+                                "rsi_quality": signal_obj.rsi_quality,
+                                "adx_value": float(signal_obj.adx_value) if signal_obj.adx_value == signal_obj.adx_value else None,
+                                "adx_regime": signal_obj.adx_regime,
+                                "stop_loss_pct": float(signal_obj.stop_loss_pct),
+                                "take_profit_pct": float(signal_obj.take_profit_pct),
+                                "position_size_pct": float(signal_obj.position_size_pct),
+                                "position_tier": signal_obj.position_tier,
+                                "matched_pattern": signal_obj.matched_pattern_name,
+                                "star_label": star_info.get("label", ""),
+                                "stars": star_info.get("stars", ""),
+                                # TF heatmap: dashboard'da görselleştirmek için
+                                "tf_statuses": [
+                                    {
+                                        "timeframe": s.timeframe,
+                                        "label": s.label,
+                                        "is_green": s.is_green,
+                                        "weight": s.weight,
+                                        "just_crossed": s.just_crossed,
+                                    }
+                                    for s in signal_obj.tf_statuses
+                                ],
+                                "timestamp": datetime.now(),
+                                "status": "PENDING",
+                            }
+                            # Aynı parite için bekleyen emir varsa mükerrer kayıt önle
+                            self.signals_collection.update_one(
+                                {"symbol": symbol, "status": "PENDING"},
+                                {"$setOnInsert": signal_doc},
+                                upsert=True,
+                            )
+                            logger.info(f"💾 {symbol} sinyali MongoDB'ye kaydedildi.")
+                        except Exception as db_err:
+                            logger.error(f"Sinyal DB'ye kaydedilemedi ({symbol}): {db_err}")
 
-                        success = self.telegram.send_multi_tf_signal(
-                            signal, chart_bytes=chart_bytes
-                        )
+                        # 2. Telegram bildirimi
+                        chart_bytes = getattr(signal_obj, "_chart_bytes", None)
+                        success = self.telegram.send_multi_tf_signal(signal_obj, chart_bytes=chart_bytes)
                         if success:
                             self._set_cooldown(symbol, "entry")
-                            signals_found.append(signal)
-                            self.daily_signals.append(signal)
-                            logger.info(f"✅ Sinyal gönderildi: {symbol}")
+                            signals_found.append(signal_obj)
+                            self.daily_signals.append(signal_obj)
 
-                # Rate limit
-                if (i + 1) % 5 == 0:
-                    time.sleep(1)
-
-            except Exception as e:
-                errors += 1
-                logger.error(f"{symbol} tarama hatası: {e}")
-                if errors > 10:
-                    logger.error("Çok fazla hata, tarama durduruluyor")
-                    break
+            time.sleep(self.BATCH_SLEEP)
 
         logger.info(f"Tarama tamamlandı: {scanned} tarandı, {len(signals_found)} sinyal bulundu")
         return signals_found
@@ -267,7 +390,7 @@ class Scanner:
 
     def run(self):
         logger.info("=" * 60)
-        logger.info("🎯 Multi-TF OCC Scanner başlatılıyor...")
+        logger.info("🎯 Multi-TF OCC Scanner + DB Modu aktif...")
         logger.info(f"   Tarama aralığı: {SCAN_INTERVAL}s")
         logger.info(f"   Timeframe'ler: {', '.join(OCC_TIMEFRAMES.keys())}")
         logger.info(f"   Min puan eşiği: {OCC_MIN_SCORE}")

@@ -3,3 +3,4 @@ pandas>=2.1
 numpy>=1.24
 python-dotenv>=1.0
 matplotlib>=3.8
+pymongo>=4.6.0
