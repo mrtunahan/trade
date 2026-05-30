@@ -1,17 +1,17 @@
 // ============================================================================
 // dashboard_backend/server.js - Jarvis Monitor API & WebSocket Sunucusu
 // ============================================================================
-// MongoDB'deki sinyal/pozisyon verilerini REST API ile sunar.
-// scanner.log dosyasını tail -f mantığıyla WebSocket üzerinden arayüze basar.
-// ============================================================================
 
-const express = require('express');
-const http = require('http');
+const express   = require('express');
+const http      = require('http');
 const { Server } = require('socket.io');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
+const mongoose  = require('mongoose');
+const cors      = require('cors');
+const fs        = require('fs');
+const path      = require('path');
+const crypto    = require('crypto');
+const axios     = require('axios');
+require('dotenv').config({ path: path.join(__dirname, '../.env') });
 
 const app = express();
 app.use(cors());
@@ -20,6 +20,141 @@ app.use(express.json());
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: { origin: '*', methods: ['GET', 'POST'] }
+});
+
+// ==================== BINANCE FUTURES PROXY ====================
+const FAPI_BASE   = 'https://fapi.binance.com';
+const API_KEY     = process.env.BINANCE_API_KEY     || '';
+const API_SECRET  = process.env.BINANCE_API_SECRET  || '';
+
+function binanceSign(params) {
+    const qs = new URLSearchParams({ ...params, timestamp: Date.now() }).toString();
+    const sig = crypto.createHmac('sha256', API_SECRET).update(qs).digest('hex');
+    return qs + '&signature=' + sig;
+}
+
+async function fapi(endpoint, params = {}) {
+    const qs = binanceSign(params);
+    const url = `${FAPI_BASE}${endpoint}?${qs}`;
+    const res = await axios.get(url, { headers: { 'X-MBX-APIKEY': API_KEY }, timeout: 10000 });
+    return res.data;
+}
+
+async function fapiPublic(endpoint, params = {}) {
+    const url = `${FAPI_BASE}${endpoint}`;
+    const res = await axios.get(url, { params, timeout: 10000 });
+    return res.data;
+}
+
+// ─── Hesap Bakiyesi ───────────────────────────────────────────────────────
+app.get('/api/binance/balance', async (req, res) => {
+    try {
+        const data = await fapi('/fapi/v2/account');
+        const usdt = data.assets?.find(a => a.asset === 'USDT') || {};
+        res.json({
+            walletBalance:    parseFloat(usdt.walletBalance    || 0),
+            availableBalance: parseFloat(usdt.availableBalance || 0),
+            unrealizedPnl:    parseFloat(usdt.unrealizedProfit || 0),
+            marginBalance:    parseFloat(usdt.marginBalance    || 0),
+            totalInitialMargin: parseFloat(data.totalInitialMargin || 0),
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ─── Açık Futures Pozisyonları ────────────────────────────────────────────
+app.get('/api/binance/positions', async (req, res) => {
+    try {
+        const data = await fapi('/fapi/v2/positionRisk');
+        const open = data.filter(p => parseFloat(p.positionAmt) !== 0);
+        res.json(open);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ─── Açık Emirler ─────────────────────────────────────────────────────────
+app.get('/api/binance/open-orders', async (req, res) => {
+    try {
+        const data = await fapi('/fapi/v1/openOrders');
+        res.json(data);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ─── Son İşlem Geçmişi ────────────────────────────────────────────────────
+app.get('/api/binance/trade-history', async (req, res) => {
+    try {
+        const symbol = req.query.symbol || 'BTCUSDT';
+        const limit  = parseInt(req.query.limit) || 20;
+        const data   = await fapi('/fapi/v1/userTrades', { symbol, limit });
+        res.json(data);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ─── PnL Özeti (son 7 gün) ────────────────────────────────────────────────
+app.get('/api/binance/income', async (req, res) => {
+    try {
+        const startTime = Date.now() - 7 * 24 * 60 * 60 * 1000;
+        const data = await fapi('/fapi/v1/income', {
+            incomeType: 'REALIZED_PNL',
+            startTime,
+            limit: 100,
+        });
+        const totalPnl = data.reduce((s, x) => s + parseFloat(x.income), 0);
+        res.json({ items: data, totalPnl: parseFloat(totalPnl.toFixed(4)) });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ─── Kline (Mum verisi) ───────────────────────────────────────────────────
+app.get('/api/binance/klines', async (req, res) => {
+    try {
+        const { symbol = 'BTCUSDT', interval = '15m', limit = 100 } = req.query;
+        const data = await fapiPublic('/fapi/v1/klines', { symbol, interval, limit });
+        const formatted = data.map(k => ({
+            time:   Math.floor(k[0] / 1000),
+            open:   parseFloat(k[1]),
+            high:   parseFloat(k[2]),
+            low:    parseFloat(k[3]),
+            close:  parseFloat(k[4]),
+            volume: parseFloat(k[5]),
+        }));
+        res.json(formatted);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ─── Order Book (Derinlik) ────────────────────────────────────────────────
+app.get('/api/binance/orderbook', async (req, res) => {
+    try {
+        const symbol = req.query.symbol || 'BTCUSDT';
+        const limit  = 20; // Binance geçerli değer: 5,10,20,50,100
+        const data = await fapiPublic('/fapi/v1/depth', { symbol, limit });
+        res.json({
+            bids: data.bids.slice(0, 10).map(([p, q]) => ({ price: parseFloat(p), qty: parseFloat(q) })),
+            asks: data.asks.slice(0, 10).map(([p, q]) => ({ price: parseFloat(p), qty: parseFloat(q) })),
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ─── Anlık Fiyat ──────────────────────────────────────────────────────────
+app.get('/api/binance/ticker', async (req, res) => {
+    try {
+        const { symbol = 'BTCUSDT' } = req.query;
+        const data = await fapiPublic('/fapi/v1/ticker/24hr', { symbol });
+        res.json(data);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // ==================== MONGODB BAĞLANTISI ====================
@@ -157,8 +292,8 @@ io.on('connection', (socket) => {
 const FRONTEND_DIST = path.join(__dirname, '../dashboard_frontend/dist');
 if (fs.existsSync(FRONTEND_DIST)) {
     app.use(express.static(FRONTEND_DIST));
-    // React SPA için tüm bilinmeyen route'ları index.html'e yönlendir
-    app.use((req, res) => {
+    // React SPA için tüm bilinmeyen route'ları index.html'e yönlendir (Express v5 uyumlu)
+    app.get('/{*path}', (req, res) => {
         res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
     });
     console.log(`📦 Frontend static dosyaları servis ediliyor: ${FRONTEND_DIST}`);
