@@ -22,5 +22,17 @@ module.exports = {
       restart_delay: 3000,
       env: { PORT: 5001, NODE_ENV: 'production' },
     },
+    {
+      name: 'order-worker',
+      script: 'order_worker.py',
+      interpreter: 'python3',
+      cwd: '/Users/tunahan/trade/trade',
+      watch: false,
+      autorestart: true,
+      restart_delay: 10000,
+      log_file: '/Users/tunahan/trade/trade/order_worker.log',
+      out_file: '/Users/tunahan/trade/trade/order_worker.log',
+      error_file: '/Users/tunahan/trade/trade/order_worker_err.log',
+    },
   ],
 };

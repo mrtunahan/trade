@@ -25,7 +25,7 @@ from config import (
     SEND_CHART_IMAGE,
     OCC_TIMEFRAMES,
     OCC_MIN_SCORE,
-    ONLY_TRY,
+    ONLY_USDT,
     NOTIFY_ALL_TF_CHANGES,
     VOLUME_SPIKE,
     STABLECOIN_BLACKLIST,
@@ -113,8 +113,8 @@ class Scanner:
         logger.info("Parite listesi güncelleniyor...")
         all_pairs = self.market.get_all_pairs()
 
-        if ONLY_TRY:
-            combined = all_pairs["TRY"]
+        if ONLY_USDT:
+            combined = all_pairs["USDT"]
         else:
             combined = all_pairs["TRY"] + all_pairs["USDT"]
 
@@ -122,8 +122,7 @@ class Scanner:
         self.last_pair_refresh = now
 
         logger.info(f"Aktif parite sayısı: {len(self.pairs)} "
-                    f"(TRY: {sum(1 for p in self.pairs if p.endswith('TRY'))}, "
-                    f"USDT: {sum(1 for p in self.pairs if p.endswith('USDT'))})")
+                    f"(USDT Perpetual Futures)")
 
         return self.pairs
 
@@ -394,7 +393,7 @@ class Scanner:
         logger.info(f"   Tarama aralığı: {SCAN_INTERVAL}s")
         logger.info(f"   Timeframe'ler: {', '.join(OCC_TIMEFRAMES.keys())}")
         logger.info(f"   Min puan eşiği: {OCC_MIN_SCORE}")
-        logger.info(f"   Parite modu: {'Sadece TRY' if ONLY_TRY else 'TRY + USDT'}")
+        logger.info(f"   Parite modu: Binance Futures USDT-M Perpetual")
         logger.info(f"   Cooldown: {ALERT_COOLDOWN_MINUTES}dk")
         logger.info("=" * 60)
 

@@ -20,10 +20,10 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# ==================== BinanceTR API ====================
+# ==================== Binance Global Futures API ====================
 BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
-BINANCE_BASE_URL   = "https://api.binance.me"
+BINANCE_BASE_URL   = "https://fapi.binance.com"  # USDT-M Perpetual Futures
 
 # ==================== TARAMA AYARLARI ====================
 SCAN_INTERVAL = 900      # Her 15 dakikada bir tara (tarama ~11dk sürüyor)
@@ -32,20 +32,16 @@ KLINE_LIMIT = 250
 
 # ==================== PARİTE AYARLARI ====================
 PAIR_MODE = "auto"  # "auto" veya "manual"
-ONLY_TRY = False    # Tüm pariteleri tara (TRY + USDT)
+ONLY_USDT = True    # Futures sadece USDT perpetual çiftlerini tarar
 
-MANUAL_TRY_PAIRS = [
-    "BTCTRY", "ETHTRY", "BNBTRY", "XRPTRY", "SOLTRY",
-    "AVXTRY", "DOGETRY", "ADATRY", "DOTTRY", "MATICTRY",
-    "LINKTRY", "SHIBTRY", "LTCTRY", "BIOTRY", "USDTTRY",
-]
 MANUAL_USDT_PAIRS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
     "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
 ]
 
 # Minimum 24s işlem hacmi filtresi (USDT cinsinden)
-MIN_VOLUME_USDT = 100_000
+# Futures pazarında hacim yüksek olduğu için 1M USDT idealdir
+MIN_VOLUME_USDT = 1_000_000
 
 # ==================== HİYERARŞİK OCC PUANLAMA ====================
 # Her timeframe'de OCC durumu (yeşil/kırmızı) kontrol edilir.
@@ -216,10 +212,10 @@ VOLUME_SPIKE = {
     "cooldown_minutes": 60,     # Aynı sembol için spike cooldown süresi
 }
 
-# Sinyal üretilmemesi gereken stablecoin ve benzeri çiftler
+# Sinyal üretilmemesi gereken stablecoin ve benzeri çiftler (Futures)
 STABLECOIN_BLACKLIST = {
-    "BUSDTRY", "USDTTRY", "USDCTRY", "TUSDTRY", "DAITRY",
-    "BUSDUSDT", "USDCUSDT", "TUSDUSDT", "DAIUSDT",
+    "USDCUSDT", "TUSDUSDT", "DAIUSDT", "BUSDUSDT",
+    "USDPUSDT", "EURUSDT", "GBPUSDT",
 }
 
 # ==================== LOGLAMA ====================
@@ -266,7 +262,7 @@ def validate_config():
                  f"Maks puan: {total_weight}, Eşik: {OCC_MIN_SCORE}")
     _logger.info(f"RSI filtre: {'Aktif' if RSI_CONFIG['enabled'] else 'Kapalı'}, "
                  f"ADX filtre: {'Aktif' if ADX_CONFIG['enabled'] else 'Kapalı'}")
-    _logger.info(f"Pariteler: {'Sadece TRY' if ONLY_TRY else 'TRY + USDT'}")
+    _logger.info(f"Pariteler: Binance Futures USDT-M Perpetual | Min hacim: {MIN_VOLUME_USDT:,} USDT")
 
     if not TELEGRAM_BOT_TOKEN:
         _logger.warning("TELEGRAM_BOT_TOKEN ayarlanmamış!")

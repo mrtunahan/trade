@@ -3,7 +3,6 @@
 // ============================================================================
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { io } from 'socket.io-client';
-import { createChart, CandlestickSeries, HistogramSeries } from 'lightweight-charts';
 import { AreaChart, Area, ResponsiveContainer, Tooltip as ReTooltip, XAxis } from 'recharts';
 import {
   Terminal, Activity, Briefcase, History, TrendingUp, Wifi, WifiOff,
@@ -63,60 +62,106 @@ function StatCard({ icon: Icon, label, value, sub, color = 'text-cyan-400' }) {
   );
 }
 
-// ── Candlestick Chart ─────────────────────────────────────────────────────────
-function CandleChart({ symbol, interval }) {
-  const ref    = useRef(null);
-  const chart  = useRef(null);
-  const series = useRef(null);
-  const volSeries = useRef(null);
+// ── TradingView Advanced Chart ───────────────────────────────────────────────
+const TV_INTERVAL_MAP = { '1m':'1', '5m':'5', '15m':'15', '1h':'60', '4h':'240', '1d':'D' };
+
+function TradingViewChart({ symbol, interval }) {
+  const containerRef = useRef(null);
 
   useEffect(() => {
-    if (!ref.current) return;
-    chart.current = createChart(ref.current, {
-      layout: { background: { color: '#030712' }, textColor: '#94a3b8' },
-      grid:   { vertLines: { color: '#1e293b' }, horzLines: { color: '#1e293b' } },
-      crosshair: { mode: 1 },
-      rightPriceScale: { borderColor: '#1e293b' },
-      timeScale: { borderColor: '#1e293b', timeVisible: true },
-      height: 320,
-    });
-    series.current = chart.current.addSeries(CandlestickSeries, {
-      upColor: '#22c55e', downColor: '#ef4444',
-      borderUpColor: '#22c55e', borderDownColor: '#ef4444',
-      wickUpColor: '#22c55e', wickDownColor: '#ef4444',
-    });
-    volSeries.current = chart.current.addSeries(HistogramSeries, {
-      priceFormat: { type: 'volume' },
-      priceScaleId: 'vol',
-    });
-    chart.current.priceScale('vol').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+    const el = containerRef.current;
+    if (!el) return;
+    el.innerHTML = '';
+    const tvSymbol   = `BINANCE:${symbol}.P`;
+    const tvInterval = TV_INTERVAL_MAP[interval] || '15';
 
-    const observer = new ResizeObserver(() => {
-      if (ref.current && chart.current)
-        chart.current.applyOptions({ width: ref.current.clientWidth });
-    });
-    observer.observe(ref.current);
-    return () => { chart.current?.remove(); observer.disconnect(); };
-  }, []);
+    const init = () => {
+      if (!window.TradingView) return;
+      new window.TradingView.widget({
+        autosize:            true,
+        symbol:              tvSymbol,
+        interval:            tvInterval,
+        timezone:            'Europe/Istanbul',
+        theme:               'dark',
+        style:               '1',
+        locale:              'tr',
+        enable_publishing:   false,
+        withdateranges:      true,
+        hide_side_toolbar:   false,
+        allow_symbol_change: false,
+        save_image:          true,
+        container_id:        'tv_chart_main',
+        studies: ['RSI@tv-basicstudies', 'MACD@tv-basicstudies'],
+      });
+    };
 
-  useEffect(() => {
-    if (!series.current) return;
-    fetch(`${API_URL}/api/binance/klines?symbol=${symbol}&interval=${interval}&limit=150`)
-      .then(r => r.json())
-      .then(data => {
-        if (!Array.isArray(data)) return;
-        series.current.setData(data);
-        volSeries.current.setData(data.map(k => ({
-          time: k.time,
-          value: k.volume,
-          color: k.close >= k.open ? '#16a34a55' : '#dc262655',
-        })));
-        chart.current?.timeScale().fitContent();
-      })
-      .catch(() => {});
+    if (window.TradingView) {
+      init();
+    } else {
+      const script = document.createElement('script');
+      script.src   = 'https://s3.tradingview.com/tv.js';
+      script.async = true;
+      script.onload = init;
+      document.head.appendChild(script);
+    }
+
+    return () => { if (el) el.innerHTML = ''; };
   }, [symbol, interval]);
 
-  return <div ref={ref} style={{ width: '100%', height: 320 }} />;
+  return <div id="tv_chart_main" ref={containerRef} style={{ width:'100%', height:'100%' }} />;
+}
+
+// ── Symbol Search Dropdown ────────────────────────────────────────────────────
+function SymbolSearch({ symbols, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [q,    setQ]    = useState('');
+  const wrapRef = useRef(null);
+
+  useEffect(() => {
+    const h = e => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, []);
+
+  const base = value.replace('USDT','');
+  const filtered = symbols
+    .filter(s => s.toLowerCase().includes(q.toLowerCase()))
+    .slice(0, 100);
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <button onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-2 bg-gray-900 border border-cyan-800 text-cyan-200 text-xs font-bold rounded px-3 py-1.5 hover:border-cyan-500 transition-colors min-w-[140px]">
+        <span>{base}<span className="text-gray-500 font-normal">/USDT</span></span>
+        <ChevronDown size={11} className="text-cyan-600 ml-auto" />
+      </button>
+      {open && (
+        <div className="absolute top-full left-0 z-50 mt-1 bg-gray-900 border border-cyan-900 rounded-lg w-52 shadow-2xl">
+          <div className="p-2 border-b border-gray-800">
+            <div className="relative">
+              <Search size={11} className="absolute left-2 top-2 text-gray-500" />
+              <input autoFocus type="text" value={q} onChange={e => setQ(e.target.value)}
+                placeholder="Ara... BTC, ETH, SOL..."
+                className="w-full bg-gray-800 border border-gray-700 text-cyan-300 text-xs rounded pl-6 pr-2 py-1.5 focus:border-cyan-600 outline-none" />
+            </div>
+          </div>
+          <div className="max-h-72 overflow-y-auto">
+            {filtered.map(s => (
+              <div key={s} onClick={() => { onChange(s); setOpen(false); setQ(''); }}
+                className={`px-3 py-1.5 text-xs cursor-pointer hover:bg-gray-800 ${
+                  s === value ? 'text-cyan-400 font-bold bg-cyan-950' : 'text-gray-300'
+                }`}>
+                <span className="text-white">{s.replace('USDT','')}</span>
+                <span className="text-gray-600">/USDT</span>
+              </div>
+            ))}
+            {filtered.length === 0 && <div className="px-3 py-4 text-xs text-gray-600 text-center">Sonuç yok</div>}
+          </div>
+          <div className="px-3 py-1.5 border-t border-gray-800 text-[10px] text-gray-600">{symbols.length} parite</div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── Order Book ────────────────────────────────────────────────────────────────
@@ -294,9 +339,11 @@ export default function App() {
 
   // Piyasa sekmesi
   const [allTickers,     setAllTickers]     = useState([]);
+  const [allSymbols,     setAllSymbols]     = useState(SYMBOLS);
   const [mkSearch,       setMkSearch]       = useState('');
   const [mkFilter,       setMkFilter]       = useState('all');  // all | gainers | losers
   const [mkSort,         setMkSort]         = useState({ col: 'quoteVolume', dir: -1 });
+  const [latency,        setLatency]        = useState(null);
 
   const logEndRef = useRef(null);
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior:'smooth' }); }, [logs]);
@@ -325,6 +372,28 @@ export default function App() {
     socket.on('log_stream', chunk => setLogs(prev => [...prev, ...chunk.split('\n').filter(Boolean)].slice(-150)));
     return () => { clearInterval(t); ['connect','disconnect','log_init','log_stream'].forEach(e=>socket.off(e)); };
   }, [fetchAll]);
+
+  // Tüm semboller — bir kez yükle
+  useEffect(() => {
+    fetch(`${API_URL}/api/binance/all-tickers`)
+      .then(r => r.json())
+      .then(d => Array.isArray(d) ? setAllSymbols(d.map(t => t.symbol)) : null)
+      .catch(() => {});
+  }, []);
+
+  // Latency ölçümü — her 3 saniyede bir
+  useEffect(() => {
+    const measure = async () => {
+      const t0 = Date.now();
+      try {
+        await fetch(`${API_URL}/api/health`);
+        setLatency(Date.now() - t0);
+      } catch { setLatency(null); }
+    };
+    measure();
+    const t = setInterval(measure, 3000);
+    return () => clearInterval(t);
+  }, []);
 
   // Piyasa sekmesi polling — sadece market tabı aktifken
   useEffect(() => {
@@ -396,6 +465,20 @@ export default function App() {
           <button onClick={fetchAll} className="p-1.5 border border-cyan-900 rounded hover:border-cyan-600 transition-colors">
             <RefreshCw size={13} className="text-cyan-500" />
           </button>
+          <div className={`flex items-center gap-1 text-[11px] px-2.5 py-1 rounded border font-mono ${
+            latency === null ? 'border-gray-700 text-gray-500'
+            : latency < 80  ? 'border-green-800 text-green-400'
+            : latency < 200 ? 'border-yellow-700 text-yellow-400'
+            : 'border-red-800 text-red-400'
+          }`}>
+            <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1 ${
+              latency === null ? 'bg-gray-600'
+              : latency < 80  ? 'bg-green-400 animate-pulse'
+              : latency < 200 ? 'bg-yellow-400 animate-pulse'
+              : 'bg-red-400 animate-pulse'
+            }`}/>
+            {latency !== null ? `${latency}ms` : '—ms'}
+          </div>
           <div className={`flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded border ${connected?'border-green-700 text-green-400':'border-red-800 text-red-400'}`}>
             {connected ? <Wifi size={11}/> : <WifiOff size={11}/>}
             {connected ? 'ONLINE' : 'OFFLINE'}
@@ -553,45 +636,42 @@ export default function App() {
 
       {/* ════════════════ CHART & EMİR DEFTERİ SEKMESİ ════════════════ */}
       {activeTab === 'chart' && (
-        <div className="space-y-3">
+        <div className="flex flex-col gap-2" style={{ height: 'calc(100vh - 130px)' }}>
 
-          {/* Sembol / Interval seçici */}
-          <div className="flex gap-2 flex-wrap">
-            <div className="relative">
-              <select value={chartSymbol} onChange={e => setChartSymbol(e.target.value)}
-                className="bg-gray-900 border border-cyan-900 text-cyan-300 text-xs rounded px-3 py-1.5 pr-6 appearance-none cursor-pointer">
-                {SYMBOLS.map(s => <option key={s} value={s}>{s}</option>)}
-              </select>
-              <ChevronDown size={10} className="absolute right-2 top-2.5 text-cyan-600 pointer-events-none" />
-            </div>
+          {/* Toolbar */}
+          <div className="flex gap-2 flex-wrap items-center bg-gray-900 border border-cyan-900 rounded-lg px-3 py-2">
+            <SymbolSearch symbols={allSymbols} value={chartSymbol} onChange={s => setChartSymbol(s)} />
             <div className="flex gap-1">
               {INTERVALS.map(iv => (
                 <button key={iv} onClick={() => setChartInterval(iv)}
-                  className={`px-2.5 py-1 text-[11px] rounded border transition-colors ${chartInterval===iv ? 'bg-cyan-900 border-cyan-600 text-cyan-200' : 'border-gray-700 text-gray-500 hover:border-cyan-800'}`}>
+                  className={`px-2.5 py-1 text-[11px] rounded border transition-colors ${
+                    chartInterval===iv ? 'bg-cyan-900 border-cyan-600 text-cyan-200 font-bold' : 'border-gray-700 text-gray-500 hover:border-cyan-800'
+                  }`}>
                   {iv}
                 </button>
               ))}
             </div>
             {ticker && (
               <div className="ml-auto flex items-center gap-4 text-xs">
-                <span className="text-gray-500">Son: <span className="text-white font-bold">{fmt(parseFloat(ticker.lastPrice),4)}</span></span>
-                <span className="text-gray-500">Yüksek: <span className="text-green-400">{fmt(parseFloat(ticker.highPrice),4)}</span></span>
-                <span className="text-gray-500">Düşük: <span className="text-red-400">{fmt(parseFloat(ticker.lowPrice),4)}</span></span>
+                <span className="text-gray-500">Son: <span className="text-white font-bold text-sm">{fmt(parseFloat(ticker.lastPrice),4)}</span></span>
+                <span className="text-gray-500">24s: <span className={parseFloat(ticker.priceChangePercent)>=0?'text-green-400 font-bold':'text-red-400 font-bold'}>{fmtPct(ticker.priceChangePercent)}</span></span>
+                <span className="text-gray-500">Y: <span className="text-green-400">{fmt(parseFloat(ticker.highPrice),4)}</span></span>
+                <span className="text-gray-500">D: <span className="text-red-400">{fmt(parseFloat(ticker.lowPrice),4)}</span></span>
                 <span className="text-gray-500">Hacim: <span className="text-cyan-300">{fmt(parseFloat(ticker.quoteVolume)/1e6,1)}M</span></span>
               </div>
             )}
           </div>
 
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
-            {/* Mum Grafiği */}
-            <div className="xl:col-span-2 bg-gray-900 border border-cyan-900 rounded-lg p-3">
-              <SectionHeader icon={BarChart2} title={`${chartSymbol} — ${chartInterval} Candlestick`} />
-              <CandleChart symbol={chartSymbol} interval={chartInterval} />
+          {/* Chart + Order Book */}
+          <div className="flex gap-2 flex-1 min-h-0">
+            {/* TradingView Chart */}
+            <div className="flex-1 min-w-0 bg-gray-950 border border-cyan-900 rounded-lg overflow-hidden">
+              <TradingViewChart symbol={chartSymbol} interval={chartInterval} />
             </div>
 
-            {/* Order Book */}
-            <div className="bg-gray-900 border border-cyan-900 rounded-lg p-3">
-              <SectionHeader icon={BookOpen} title={`Order Book — ${chartSymbol}`} />
+            {/* Order Book — sağ panel */}
+            <div className="w-64 shrink-0 bg-gray-900 border border-cyan-900 rounded-lg p-3 overflow-y-auto">
+              <SectionHeader icon={BookOpen} title={`Order Book`} />
               <OrderBook symbol={chartSymbol} />
             </div>
           </div>
