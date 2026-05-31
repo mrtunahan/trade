@@ -42,6 +42,28 @@ class MarketData:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
 
+    def _send_public_request(self, endpoint: str, params: dict = None, timeout: int = 15) -> Optional[dict]:
+        """Gönderilen genel istekleri rate limit (429/418) korumasıyla iletir."""
+        url = f"{self.base_url}{endpoint}"
+        for attempt in range(3):
+            try:
+                resp = self.session.get(url, params=params, timeout=timeout)
+                if resp.status_code in [429, 418]:
+                    logger.warning(
+                        f"⚠️ Binance Rate Limit (HTTP {resp.status_code}) on {endpoint}. "
+                        f"5 saniye bekleniyor... (Deneme {attempt+1}/3)"
+                    )
+                    time.sleep(5)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as e:
+                if attempt == 2:
+                    logger.error(f"Public request error after 3 attempts on {endpoint}: {e}")
+                    return None
+                time.sleep(1)
+        return None
+
     # ==================== GÜVENLİK VE İMZA ====================
 
     def _generate_signature(self, query_string: str) -> str:
@@ -96,10 +118,9 @@ class MarketData:
             return {"USDT": MANUAL_USDT_PAIRS, "TRY": []}
 
         try:
-            url = f"{self.base_url}/fapi/v1/exchangeInfo"
-            resp = self.session.get(url, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
+            data = self._send_public_request("/fapi/v1/exchangeInfo", timeout=15)
+            if not data:
+                return {"USDT": MANUAL_USDT_PAIRS, "TRY": []}
 
             usdt_pairs = []
             for s in data.get("symbols", []):
@@ -125,10 +146,10 @@ class MarketData:
             return pairs
 
         try:
-            url = f"{self.base_url}/fapi/v1/ticker/24hr"
-            resp = self.session.get(url, timeout=15)
-            resp.raise_for_status()
-            tickers = {t["symbol"]: t for t in resp.json()}
+            tickers_list = self._send_public_request("/fapi/v1/ticker/24hr", timeout=15)
+            if not tickers_list:
+                return pairs
+            tickers = {t["symbol"]: t for t in tickers_list}
 
             filtered = []
             for symbol in pairs:
@@ -163,11 +184,8 @@ class MarketData:
         limit = limit or KLINE_LIMIT
 
         try:
-            url = f"{self.base_url}/fapi/v1/klines"
             params = {"symbol": symbol, "interval": interval, "limit": limit}
-            resp = self.session.get(url, params=params, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
+            data = self._send_public_request("/fapi/v1/klines", params=params, timeout=15)
 
             if not data:
                 return None
@@ -202,20 +220,18 @@ class MarketData:
     def get_price(self, symbol: str) -> Optional[float]:
         """Futures anlık fiyatı döner."""
         try:
-            url = f"{self.base_url}/fapi/v1/ticker/price"
-            resp = self.session.get(url, params={"symbol": symbol}, timeout=10)
-            resp.raise_for_status()
-            return float(resp.json()["price"])
+            data = self._send_public_request("/fapi/v1/ticker/price", params={"symbol": symbol}, timeout=10)
+            if not data:
+                return None
+            return float(data["price"])
         except Exception:
             return None
 
     def get_ticker_24h(self, symbol: str) -> Optional[dict]:
         """24 saatlik Futures ticker bilgisi."""
         try:
-            url = f"{self.base_url}/fapi/v1/ticker/24hr"
-            resp = self.session.get(url, params={"symbol": symbol}, timeout=10)
-            resp.raise_for_status()
-            return resp.json()
+            data = self._send_public_request("/fapi/v1/ticker/24hr", params={"symbol": symbol}, timeout=10)
+            return data
         except Exception:
             return None
 

@@ -241,8 +241,8 @@ class Scanner:
 
     # ==================== TEKİL PARİTE TARAMA ====================
 
-    PAIR_BATCH_SIZE = 5
-    BATCH_SLEEP = 0.5
+    PAIR_BATCH_SIZE = 3
+    BATCH_SLEEP = 1.2
 
     def _scan_single_pair(self, symbol: str) -> dict:
         result = {"symbol": symbol, "signal": None, "changes": [], "spike": False, "ok": False}

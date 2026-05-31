@@ -28,6 +28,32 @@ function fmtPct(v) {
   const n = Number(v);
   return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
 }
+function playFuturisticChime() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const playTone = (freq, startTime, duration, vol) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, startTime);
+      gain.gain.setValueAtTime(0, startTime);
+      gain.gain.linearRampToValueAtTime(vol, startTime + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(startTime);
+      osc.stop(startTime + duration);
+    };
+    const now = ctx.currentTime;
+    playTone(523.25, now, 0.4, 0.08);
+    playTone(659.25, now + 0.08, 0.4, 0.08);
+    playTone(783.99, now + 0.16, 0.4, 0.08);
+    playTone(1046.50, now + 0.24, 0.8, 0.12);
+  } catch (e) {
+    console.log('Audio error:', e);
+  }
+}
+
 function splitSym(s = '') {
   if (s.endsWith('USDT')) return [s.replace('USDT', ''), 'USDT'];
   if (s.endsWith('TRY'))  return [s.replace('TRY', ''),  'TRY'];
@@ -170,14 +196,23 @@ function OrderBook({ symbol }) {
   useEffect(() => {
     const load = () =>
       fetch(`${API_URL}/api/binance/orderbook?symbol=${symbol}&limit=15`)
-        .then(r => r.json()).then(setBook).catch(() => {});
+        .then(r => r.json())
+        .then(d => {
+          if (d && Array.isArray(d.bids) && Array.isArray(d.asks)) {
+            setBook(d);
+          }
+        })
+        .catch(() => {});
     load();
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
   }, [symbol]);
 
+  const bids = Array.isArray(book.bids) ? book.bids : [];
+  const asks = Array.isArray(book.asks) ? book.asks : [];
+
   const maxQ = Math.max(
-    ...[...book.bids, ...book.asks].map(x => x.qty), 1
+    ...[...bids, ...asks].map(x => x.qty || 0), 1
   );
 
   return (
@@ -186,7 +221,7 @@ function OrderBook({ symbol }) {
         <div className="flex justify-between text-gray-500 mb-1 text-[10px]">
           <span>BİD (Alış)</span><span>MİKTAR</span>
         </div>
-        {book.bids.map((b, i) => (
+        {bids.map((b, i) => (
           <div key={i} className="relative flex justify-between py-0.5">
             <div className="absolute inset-0 right-auto bg-green-950 opacity-50 rounded"
               style={{ width: `${(b.qty / maxQ) * 100}%` }} />
@@ -199,7 +234,7 @@ function OrderBook({ symbol }) {
         <div className="flex justify-between text-gray-500 mb-1 text-[10px]">
           <span>ASK (Satış)</span><span>MİKTAR</span>
         </div>
-        {book.asks.map((a, i) => (
+        {asks.map((a, i) => (
           <div key={i} className="relative flex justify-between py-0.5">
             <div className="absolute inset-0 right-auto bg-red-950 opacity-50 rounded"
               style={{ width: `${(a.qty / maxQ) * 100}%` }} />
@@ -230,18 +265,29 @@ function TfHeatmap({ tfStatuses = [] }) {
 }
 
 // ── Sinyal Kartı ──────────────────────────────────────────────────────────────
-function SignalCard({ sig }) {
+function SignalCard({ sig, onSelect, onExecute }) {
   const [base, quote] = splitSym(sig.symbol);
   const sl  = sig.price * (1 - sig.stop_loss_pct  / 100);
   const tp  = sig.price * (1 + sig.take_profit_pct / 100);
   const rr  = sig.stop_loss_pct > 0 ? (sig.take_profit_pct / sig.stop_loss_pct).toFixed(1) : '—';
   const statusColor = { PENDING:'yellow', EXECUTED:'green', SKIPPED:'gray', EXPIRED:'red' }[sig.status] || 'gray';
   const ts = sig.timestamp ? new Date(sig.timestamp).toLocaleString('tr-TR',{dateStyle:'short',timeStyle:'short'}) : '—';
+  
+  let glowClass = "border-cyan-900";
+  if (sig.stars === "⭐⭐⭐") {
+    glowClass = "border-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.15)]";
+  } else if (sig.stars === "⭐⭐") {
+    glowClass = "border-cyan-500 shadow-[0_0_12px_rgba(6,182,212,0.15)]";
+  }
+  
   return (
-    <div className="bg-gray-900 border border-cyan-900 rounded-lg p-3 text-xs space-y-2">
+    <div className={`bg-gray-900 border ${glowClass} rounded-lg p-3 text-xs space-y-2 hover:border-cyan-400 transition-all cursor-pointer`}
+         onClick={() => onSelect && onSelect(sig.symbol)}>
       <div className="flex items-start justify-between gap-2">
         <div>
-          <div className="text-base font-bold text-white">🔥 {base}/<span className="text-cyan-400">{quote}</span></div>
+          <div className="text-base font-bold text-white flex items-center gap-1">
+            🔥 {base}/<span className="text-cyan-400">{quote}</span>
+          </div>
           <div className="text-[10px] text-gray-500 mt-0.5">{ts}</div>
         </div>
         <div className="flex flex-col items-end gap-1">
@@ -277,10 +323,22 @@ function SignalCard({ sig }) {
         <span className="text-gray-400">R:R <span className="text-white font-bold">1:{rr}</span></span>
       </div>
       <TfHeatmap tfStatuses={sig.tf_statuses} />
-      <div className="flex gap-3 text-[10px] text-gray-400 border-t border-gray-800 pt-1.5">
+      <div className="flex gap-3 text-[10px] text-gray-400 border-t border-gray-800 pt-1.5 items-center">
         <span>RSI <span className={`font-bold ${sig.rsi_quality==='ideal'?'text-green-400':sig.rsi_quality==='caution'?'text-yellow-400':'text-cyan-300'}`}>{fmt(sig.rsi_value,1)}</span></span>
         <span>ADX <span className={`font-bold ${sig.adx_regime==='trending'?'text-green-400':sig.adx_regime==='ranging'?'text-yellow-400':'text-gray-400'}`}>{fmt(sig.adx_value,1)}</span></span>
-        <span className="ml-auto">Poz <span className="text-purple-300 font-bold">{fmt(sig.position_size_pct,0)}%</span></span>
+        <span>Poz <span className="text-purple-300 font-bold">{fmt(sig.position_size_pct,0)}%</span></span>
+        
+        {sig.status === 'PENDING' && (
+          <button onClick={(e) => {
+            e.stopPropagation();
+            if (confirm(`${sig.symbol} sinyalini hemen manuel işleme almak istediğinize emin misiniz?`)) {
+              onExecute && onExecute(sig._id);
+            }
+          }}
+          className="ml-auto bg-cyan-950 border border-cyan-500 text-cyan-300 px-2 py-0.5 rounded hover:bg-cyan-900 transition-colors text-[9px] font-bold">
+            Hemen İşle
+          </button>
+        )}
       </div>
     </div>
   );
@@ -323,6 +381,10 @@ export default function App() {
   const [activeTab,      setActiveTab]      = useState('overview');   // overview | chart | scanner | log
   const [chartSymbol,    setChartSymbol]    = useState('BTCUSDT');
   const [chartInterval,  setChartInterval]  = useState('15m');
+  
+  // Canlı Log Arama ve Seviye Filtreleme
+  const [logSearch,      setLogSearch]      = useState('');
+  const [logLevelFilter, setLogLevelFilter] = useState('ALL');
 
   // Binance verisi
   const [balance,        setBalance]        = useState(null);
@@ -346,17 +408,115 @@ export default function App() {
   const [latency,        setLatency]        = useState(null);
 
   const logEndRef = useRef(null);
+  const prevSignalsLengthRef = useRef(0);
+
+  // Premium fütüristik stil enjeksiyonu (Glassmorphism & Neon Borders)
+  useEffect(() => {
+    const styleEl = document.createElement('style');
+    styleEl.innerHTML = `
+      .glass-panel {
+        background: rgba(17, 24, 39, 0.75) !important;
+        backdrop-filter: blur(12px) !important;
+        -webkit-backdrop-filter: blur(12px) !important;
+        border: 1px solid rgba(6, 182, 212, 0.1) !important;
+      }
+      .glass-panel:hover {
+        border-color: rgba(6, 182, 212, 0.25) !important;
+        box-shadow: 0 0 15px rgba(6, 182, 212, 0.05) !important;
+      }
+    `;
+    document.head.appendChild(styleEl);
+    return () => {
+      try { document.head.removeChild(styleEl); } catch(e) {}
+    };
+  }, []);
+
+  // Yeni Sinyal Geldiğinde Sesli Uyarı Çal (Futuristic Synth Chime)
+  useEffect(() => {
+    if (recentSignals.length > prevSignalsLengthRef.current) {
+      if (prevSignalsLengthRef.current > 0) {
+        playFuturisticChime();
+      }
+      prevSignalsLengthRef.current = recentSignals.length;
+    }
+  }, [recentSignals]);
+
+  // Sinyal Kartına Tıklandığında Grafiği Yükle ve Sekmeyi Değiştir
+  const handleSelectSignal = (symbol) => {
+    let sym = symbol;
+    if (symbol.endsWith('TRY')) {
+      sym = symbol.replace('TRY', 'USDT');
+    }
+    setChartSymbol(sym);
+    setActiveTab('chart');
+    playFuturisticChime();
+  };
+
+  // Bekleyen Sinyali Manuel Olarak Hemen İşleme Al (Force Execute)
+  const handleForceExecute = (signalId) => {
+    fetch(`${API_URL}/api/signals/execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signalId })
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.success) {
+        playFuturisticChime();
+        alert('🎯 Sinyal başarıyla manuel tetiklendi, LONG pozisyon açıldı!');
+        fetchAll();
+      } else {
+        alert('Hata: ' + (data.error || 'İşlem başarısız oldu.'));
+      }
+    })
+    .catch(err => {
+      alert('Bağlantı hatası: ' + err.message);
+    });
+  };
+
+  // Açık Pozisyonu Arayüzden Tek Tıkla Borsada Kapat (Market Close)
+  const handleClosePosition = (symbol, quantity, side) => {
+    if (!confirm(`🚨 ${symbol} pozisyonunu piyasa fiyatından kapatmak istediğinize emin misiniz?`)) return;
+    
+    fetch(`${API_URL}/api/positions/close`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol, quantity, side })
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.success) {
+        playFuturisticChime();
+        alert('✅ Pozisyon başarıyla kapatıldı!');
+        fetchAll();
+      } else {
+        alert('Hata: ' + (data.error || 'Pozisyon kapatılamadı.'));
+      }
+    })
+    .catch(err => {
+      alert('Bağlantı hatası: ' + err.message);
+    });
+  };
+
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior:'smooth' }); }, [logs]);
 
   // ─ Veri çekme ────────────────────────────────────────────────────────────
   const fetchAll = useCallback(() => {
-    // Binance
-    fetch(`${API_URL}/api/binance/balance`)      .then(r=>r.json()).then(setBalance).catch(()=>{});
-    fetch(`${API_URL}/api/binance/positions`)     .then(r=>r.json()).then(d=>Array.isArray(d)?setBinPositions(d):[]).catch(()=>{});
-    fetch(`${API_URL}/api/binance/open-orders`)   .then(r=>r.json()).then(d=>Array.isArray(d)?setOpenOrders(d):[]).catch(()=>{});
-    fetch(`${API_URL}/api/binance/income`)        .then(r=>r.json()).then(setIncome).catch(()=>{});
-    fetch(`${API_URL}/api/binance/ticker?symbol=${chartSymbol}`).then(r=>r.json()).then(setTicker).catch(()=>{});
-    // MongoDB
+    // 1. Canlı Binance Verileri (Tek Birleşik Staggered İstek - 418 Önleyici)
+    fetch(`${API_URL}/api/dashboard/all-data?symbol=${chartSymbol}`)
+      .then(r => r.json())
+      .then(d => {
+        if (d) {
+          if (d.balance) setBalance(d.balance);
+          if (d.positions) setBinPositions(d.positions);
+          if (d.openOrders) setOpenOrders(d.openOrders);
+          if (d.income) setIncome(d.income);
+          if (d.ticker) setTicker(d.ticker);
+        }
+      })
+      .catch(err => console.error("Dashboard fetch error:", err));
+
+    // 2. Lokal MongoDB Verileri (Hızlı & Limitsiz)
     fetch(`${API_URL}/api/signals/recent`)       .then(r=>r.json()).then(d=>Array.isArray(d)?setRecentSignals(d):[]).catch(()=>{});
     fetch(`${API_URL}/api/positions/open`)        .then(r=>r.json()).then(d=>Array.isArray(d)?setDbPositions(d):[]).catch(()=>{});
     fetch(`${API_URL}/api/positions/history`)     .then(r=>r.json()).then(d=>Array.isArray(d)?setHistory(d):[]).catch(()=>{});
@@ -418,6 +578,27 @@ export default function App() {
 
   // ─ Hesaplanan değerler ────────────────────────────────────────────────────
   const pnlColor = v => v > 0 ? 'text-green-400' : v < 0 ? 'text-red-400' : 'text-gray-400';
+
+  // Performans İstatistikleri Hesaplama
+  const totalClosed = history.length;
+  const winningTrades = history.filter(h => h.final_pnl_pct > 0);
+  const losingTrades = history.filter(h => h.final_pnl_pct <= 0);
+  const winRate = totalClosed > 0 ? (winningTrades.length / totalClosed) * 100 : 0;
+  
+  const totalProfitPct = winningTrades.reduce((sum, h) => sum + (h.final_pnl_pct || 0), 0);
+  const totalLossPct = Math.abs(losingTrades.reduce((sum, h) => sum + (h.final_pnl_pct || 0), 0));
+  const profitFactor = totalLossPct > 0 ? (totalProfitPct / totalLossPct) : totalProfitPct > 0 ? 99.9 : 0;
+  const avgPnl = totalClosed > 0 ? history.reduce((sum, h) => sum + (h.final_pnl_pct || 0), 0) / totalClosed : 0;
+
+  // Canlı Log filtreleme mantığı
+  const filteredLogs = logs.filter(l => {
+    if (logSearch && !l.toLowerCase().includes(logSearch.toLowerCase())) return false;
+    if (logLevelFilter === 'INFO' && !l.includes('INFO')) return false;
+    if (logLevelFilter === 'WARNING' && !l.includes('WARNING')) return false;
+    if (logLevelFilter === 'ERROR' && !l.includes('ERROR')) return false;
+    if (logLevelFilter === 'SIGNAL' && !(l.includes('ALIM') || l.includes('🔔') || l.includes('Pozisyon') || l.includes('sinyali'))) return false;
+    return true;
+  });
 
   // ─ Piyasa yardımcıları ────────────────────────────────────────────────────
   const mkSortFn = (col) => {
@@ -509,6 +690,14 @@ export default function App() {
             <StatCard icon={Briefcase}  label="Açık Pozisyon"       value={binPositions.length} color="text-purple-400" />
           </div>
 
+          {/* Performans İstatistikleri */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            <StatCard icon={Zap} label="Kazanma Oranı (Win Rate)" value={winRate.toFixed(1) + ' %'} color={winRate >= 50 ? 'text-green-400' : 'text-yellow-400'} sub={`${winningTrades.length} Başarılı / ${totalClosed} Toplam`} />
+            <StatCard icon={TrendingUp} label="Kâr Faktörü (Profit Factor)" value={profitFactor === 99.9 ? '∞' : profitFactor.toFixed(2)} color={profitFactor >= 1.5 ? 'text-green-400' : profitFactor >= 1.0 ? 'text-yellow-400' : 'text-red-400'} sub="Toplam Kâr / Toplam Zarar" />
+            <StatCard icon={Activity} label="Ortalama İşlem PnL" value={fmtPct(avgPnl)} color={pnlColor(avgPnl)} sub="İşlem başına ortalama getiri" />
+            <StatCard icon={History} label="Toplam Kapatılan İşlem" value={totalClosed} color="text-gray-400" sub="Tüm bot işlem geçmişi" />
+          </div>
+
           {/* PnL Grafiği */}
           {income.items?.length > 0 && (
             <div className="bg-gray-900 border border-cyan-900 rounded-lg p-4">
@@ -533,7 +722,8 @@ export default function App() {
                       <th className="text-right pr-3">MARK</th>
                       <th className="text-right pr-3">LİK. FİYAT</th>
                       <th className="text-right pr-3">MARGIN</th>
-                      <th className="text-right">UNREALIZED PNL</th>
+                      <th className="text-right pr-3">UNREALIZED PNL</th>
+                      <th className="text-right">İŞLEM</th>
                     </tr></thead>
                     <tbody>
                       {binPositions.map((p, i) => {
@@ -549,7 +739,13 @@ export default function App() {
                             <td className="text-right pr-3">{fmt(parseFloat(p.markPrice),4)}</td>
                             <td className="text-right pr-3 text-red-400">{fmt(parseFloat(p.liquidationPrice),4)}</td>
                             <td className="text-right pr-3">{fmt(parseFloat(p.isolatedMargin||p.positionInitialMargin),2)}</td>
-                            <td className={`text-right font-bold ${pnlColor(upnl)}`}>{fmt(upnl,4)} $</td>
+                            <td className={`text-right font-bold pr-3 ${pnlColor(upnl)}`}>{fmt(upnl,4)} $</td>
+                            <td className="text-right">
+                              <button onClick={() => handleClosePosition(p.symbol, Math.abs(qty), side)}
+                                      className="bg-red-950 border border-red-800 text-red-400 px-2 py-0.5 rounded hover:bg-red-900 transition-colors text-[10px] font-bold">
+                                Kapat
+                              </button>
+                            </td>
                           </tr>
                         );
                       })}
@@ -801,7 +997,9 @@ export default function App() {
             ? <p className="text-xs text-gray-600 text-center py-10">Henüz sinyal üretilmedi. Scanner tarıyor…</p>
             : (
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-                {recentSignals.map((sig, i) => <SignalCard key={i} sig={sig} />)}
+                {recentSignals.map((sig, i) => (
+                  <SignalCard key={i} sig={sig} onSelect={handleSelectSignal} onExecute={handleForceExecute} />
+                ))}
               </div>
             )}
         </div>
@@ -809,12 +1007,37 @@ export default function App() {
 
       {/* ════════════════ CANLI LOG SEKMESİ ════════════════ */}
       {activeTab === 'log' && (
-        <div className="bg-gray-900 border border-cyan-900 rounded-lg p-4">
-          <SectionHeader icon={Terminal} title="Jarvis Live Core Log Stream" />
-          <div className="h-[70vh] overflow-y-auto text-xs leading-5 space-y-0.5 pr-1 font-mono">
-            {logs.length === 0
-              ? <span className="text-gray-600">Log bekleniyor…</span>
-              : logs.map((line, i) => (
+        <div className="bg-gray-900 border border-cyan-900 rounded-lg p-4 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2 border-b border-cyan-900 pb-2">
+            <div className="flex items-center gap-2">
+              <Terminal size={14} className="text-cyan-500" />
+              <span className="text-xs font-mono text-cyan-400 uppercase tracking-widest">Jarvis Live Core Log Stream</span>
+            </div>
+            
+            {/* Canlı Log Arama ve Filtreleme */}
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <Search size={11} className="absolute left-2 top-2 text-gray-500" />
+                <input type="text" value={logSearch} onChange={e => setLogSearch(e.target.value)}
+                  placeholder="Loglarda ara..."
+                  className="bg-gray-800 border border-gray-700 text-cyan-300 text-xs rounded pl-6 pr-2 py-1 w-36 focus:border-cyan-600 outline-none" />
+              </div>
+              <div className="flex gap-0.5">
+                {['ALL', 'INFO', 'WARNING', 'ERROR', 'SIGNAL'].map(lvl => (
+                  <button key={lvl} onClick={() => setLogLevelFilter(lvl)}
+                    className={`px-2 py-0.5 text-[9px] font-bold rounded border transition-colors ${
+                      logLevelFilter === lvl ? 'bg-cyan-950 border-cyan-500 text-cyan-300' : 'border-gray-800 text-gray-500 hover:text-gray-400'
+                    }`}>
+                    {lvl === 'ALL' ? 'Tümü' : lvl === 'SIGNAL' ? 'Sinyal' : lvl}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="h-[68vh] overflow-y-auto text-xs leading-5 space-y-0.5 pr-1 font-mono">
+            {filteredLogs.length === 0
+              ? <span className="text-gray-600">Log bulunamadı veya log bekleniyor…</span>
+              : filteredLogs.map((line, i) => (
                   <div key={i} className={`whitespace-pre-wrap break-all ${logColor(line)}`}>{line}</div>
                 ))}
             <div ref={logEndRef} />
