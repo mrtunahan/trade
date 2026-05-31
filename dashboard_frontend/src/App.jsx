@@ -7,7 +7,8 @@ import { AreaChart, Area, ResponsiveContainer, Tooltip as ReTooltip, XAxis } fro
 import {
   Terminal, Activity, Briefcase, History, TrendingUp, Wifi, WifiOff,
   Zap, DollarSign, BarChart2, BookOpen, RefreshCw, ChevronDown,
-  Globe, Search, ArrowUp, ArrowDown,
+  Globe, Search, ArrowUp, ArrowDown, Volume2, VolumeX, AlertTriangle,
+  Play, ArrowRightLeft, Shield, Sliders, Info, Percent, Eye, Wallet, Coins
 } from 'lucide-react';
 
 const API_URL = 'http://localhost:5001';
@@ -30,6 +31,11 @@ function fmtPct(v) {
 }
 function playFuturisticChime() {
   try {
+    const isMuted = localStorage.getItem('jarvis_sound_muted') === 'true';
+    if (isMuted) return;
+    const volSetting = parseFloat(localStorage.getItem('jarvis_sound_volume') ?? '80');
+    const volumeMultiplier = volSetting / 100;
+
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const playTone = (freq, startTime, duration, vol) => {
       const osc = ctx.createOscillator();
@@ -37,7 +43,7 @@ function playFuturisticChime() {
       osc.type = 'sine';
       osc.frequency.setValueAtTime(freq, startTime);
       gain.gain.setValueAtTime(0, startTime);
-      gain.gain.linearRampToValueAtTime(vol, startTime + 0.05);
+      gain.gain.linearRampToValueAtTime(vol * volumeMultiplier, startTime + 0.05);
       gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
       osc.connect(gain);
       gain.connect(ctx.destination);
@@ -93,52 +99,86 @@ const TV_INTERVAL_MAP = { '1m':'1', '5m':'5', '15m':'15', '1h':'60', '4h':'240',
 
 function TradingViewChart({ symbol, interval }) {
   const containerRef = useRef(null);
+  const widgetRef = useRef(null);
 
+  // Sembol veya interval değiştiğinde
   useEffect(() => {
+    const tvSymbol   = `BINANCE:${symbol}`;
+    const tvInterval = TV_INTERVAL_MAP[interval] || '15';
+
+    if (widgetRef.current) {
+      // Eğer widget zaten varsa, yok etmeden sadece sembol/interval güncelle!
+      try {
+        if (typeof widgetRef.current.setSymbol === 'function') {
+          widgetRef.current.setSymbol(tvSymbol, tvInterval);
+          return;
+        }
+      } catch (err) {
+        console.error("TradingView setSymbol error:", err);
+      }
+    }
+
+    // Widget yoksa veya hata oluştuysa sıfırdan oluştur
     const el = containerRef.current;
     if (!el) return;
     el.innerHTML = '';
-    const tvSymbol   = `BINANCE:${symbol}.P`;
-    const tvInterval = TV_INTERVAL_MAP[interval] || '15';
 
     const init = () => {
       if (!window.TradingView) return;
-      new window.TradingView.widget({
-        autosize:            true,
-        symbol:              tvSymbol,
-        interval:            tvInterval,
-        timezone:            'Europe/Istanbul',
-        theme:               'dark',
-        style:               '1',
-        locale:              'tr',
-        enable_publishing:   false,
-        withdateranges:      true,
-        hide_side_toolbar:   false,
-        allow_symbol_change: false,
-        save_image:          true,
-        container_id:        'tv_chart_main',
-        studies: ['RSI@tv-basicstudies', 'MACD@tv-basicstudies'],
-      });
+      try {
+        widgetRef.current = new window.TradingView.widget({
+          autosize:            true,
+          symbol:              tvSymbol,
+          interval:            tvInterval,
+          timezone:            'Europe/Istanbul',
+          theme:               'dark',
+          style:               '1',
+          locale:              'tr',
+          enable_publishing:   false,
+          withdateranges:      true,
+          hide_side_toolbar:   false,
+          allow_symbol_change: false,
+          save_image:          true,
+          container_id:        'tv_chart_main',
+          studies: ['RSI@tv-basicstudies', 'MACD@tv-basicstudies'],
+        });
+      } catch (e) {
+        console.error("TradingView widget init error:", e);
+      }
     };
 
-    if (window.TradingView) {
-      init();
-    } else {
-      const script = document.createElement('script');
-      script.src   = 'https://s3.tradingview.com/tv.js';
-      script.async = true;
-      script.onload = init;
-      document.head.appendChild(script);
-    }
+    // Flexbox ve yükseklik yerleşimi için 200ms gecikme (Göstergeler popup scroll/kesilme hatasını önler)
+    const timer = setTimeout(() => {
+      if (window.TradingView) {
+        init();
+      } else {
+        const script = document.createElement('script');
+        script.src   = 'https://s3.tradingview.com/tv.js';
+        script.async = true;
+        script.onload = init;
+        document.head.appendChild(script);
+      }
+    }, 200);
 
-    return () => { if (el) el.innerHTML = ''; };
+    return () => {
+      clearTimeout(timer);
+    };
   }, [symbol, interval]);
+
+  // Tab değişimi / unmount durumunda widget'ı temizle
+  useEffect(() => {
+    return () => {
+      widgetRef.current = null;
+      const el = containerRef.current;
+      if (el) el.innerHTML = '';
+    };
+  }, []);
 
   return <div id="tv_chart_main" ref={containerRef} style={{ width:'100%', height:'100%' }} />;
 }
 
 // ── Symbol Search Dropdown ────────────────────────────────────────────────────
-function SymbolSearch({ symbols, value, onChange }) {
+function SymbolSearch({ symbols, value, onChange, quoteAsset = 'USDT' }) {
   const [open, setOpen] = useState(false);
   const [q,    setQ]    = useState('');
   const wrapRef = useRef(null);
@@ -149,7 +189,7 @@ function SymbolSearch({ symbols, value, onChange }) {
     return () => document.removeEventListener('mousedown', h);
   }, []);
 
-  const base = value.replace('USDT','');
+  const base = value.endsWith(quoteAsset) ? value.slice(0, -quoteAsset.length) : value.replace('USDT','');
   const filtered = symbols
     .filter(s => s.toLowerCase().includes(q.toLowerCase()))
     .slice(0, 100);
@@ -158,7 +198,7 @@ function SymbolSearch({ symbols, value, onChange }) {
     <div ref={wrapRef} className="relative">
       <button onClick={() => setOpen(o => !o)}
         className="flex items-center gap-2 bg-gray-900 border border-cyan-800 text-cyan-200 text-xs font-bold rounded px-3 py-1.5 hover:border-cyan-500 transition-colors min-w-[140px]">
-        <span>{base}<span className="text-gray-500 font-normal">/USDT</span></span>
+        <span>{base}<span className="text-gray-500 font-normal">/{quoteAsset}</span></span>
         <ChevronDown size={11} className="text-cyan-600 ml-auto" />
       </button>
       {open && (
@@ -172,15 +212,18 @@ function SymbolSearch({ symbols, value, onChange }) {
             </div>
           </div>
           <div className="max-h-72 overflow-y-auto">
-            {filtered.map(s => (
-              <div key={s} onClick={() => { onChange(s); setOpen(false); setQ(''); }}
-                className={`px-3 py-1.5 text-xs cursor-pointer hover:bg-gray-800 ${
-                  s === value ? 'text-cyan-400 font-bold bg-cyan-950' : 'text-gray-300'
-                }`}>
-                <span className="text-white">{s.replace('USDT','')}</span>
-                <span className="text-gray-600">/USDT</span>
-              </div>
-            ))}
+            {filtered.map(s => {
+              const displayBase = s.endsWith(quoteAsset) ? s.slice(0, -quoteAsset.length) : s.replace('USDT','');
+              return (
+                <div key={s} onClick={() => { onChange(s); setOpen(false); setQ(''); }}
+                  className={`px-3 py-1.5 text-xs cursor-pointer hover:bg-gray-800 ${
+                    s === value ? 'text-cyan-400 font-bold bg-cyan-950' : 'text-gray-300'
+                  }`}>
+                  <span className="text-white">{displayBase}</span>
+                  <span className="text-gray-600">/{quoteAsset}</span>
+                </div>
+              );
+            })}
             {filtered.length === 0 && <div className="px-3 py-4 text-xs text-gray-600 text-center">Sonuç yok</div>}
           </div>
           <div className="px-3 py-1.5 border-t border-gray-800 text-[10px] text-gray-600">{symbols.length} parite</div>
@@ -253,90 +296,185 @@ function TfHeatmap({ tfStatuses = [] }) {
   const order = ['1w','1d','4h','1h','15m'];
   const sorted = [...tfStatuses].sort((a, b) => order.indexOf(a.timeframe) - order.indexOf(b.timeframe));
   return (
-    <div className="flex gap-1 flex-wrap mt-1">
-      {sorted.map(s => (
-        <span key={s.timeframe}
-          className={`text-[10px] px-1.5 py-0.5 rounded font-bold border ${s.is_green ? 'bg-green-950 border-green-700 text-green-400' : 'bg-red-950 border-red-800 text-red-400'} ${s.just_crossed ? 'ring-1 ring-yellow-400' : ''}`}>
-          {s.is_green ? '●' : '○'} {s.timeframe}{s.weight > 0 ? ` [${s.weight}p]` : ' [tetik]'}{s.just_crossed ? ' ←' : ''}
-        </span>
-      ))}
+    <div className="flex items-center gap-1.5 mt-1 border border-cyan-950/40 rounded p-1.5 bg-gray-950/40">
+      <span className="text-[9px] text-gray-500 uppercase font-bold tracking-wider mr-1">OCC TF:</span>
+      {sorted.map(s => {
+        const title = `${s.timeframe} - ${s.is_green ? 'Yükseliş (Yeşil)' : 'Düşüş (Kırmızı)'} [${s.weight}p]${s.just_crossed ? ' (Yeni Geçiş!)' : ''}`;
+        return (
+          <div key={s.timeframe} 
+            title={title}
+            className={`relative w-7 h-7 flex flex-col items-center justify-center rounded text-[8px] font-bold select-none border transition-all ${
+              s.is_green 
+                ? 'bg-green-950 border-green-600 text-green-300 shadow-[inset_0_0_6px_rgba(34,197,94,0.15)]' 
+                : 'bg-red-950 border-red-800 text-red-400 shadow-[inset_0_0_6px_rgba(239,68,68,0.15)]'
+            } ${s.just_crossed ? 'animate-pulse ring-1 ring-yellow-400 border-yellow-400' : ''}`}
+          >
+            {s.just_crossed && (
+              <span className="absolute -top-1 -right-1 w-2 h-2 bg-yellow-400 rounded-full shadow-[0_0_4px_#facc15] animate-ping" />
+            )}
+            <span>{s.timeframe}</span>
+            <span className={`text-[7px] leading-none mt-0.5 ${s.is_green ? 'text-green-400' : 'text-red-500'}`}>
+              {s.is_green ? '▲' : '▼'}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
 // ── Sinyal Kartı ──────────────────────────────────────────────────────────────
-function SignalCard({ sig, onSelect, onExecute }) {
+function SignalCard({ sig, onSelect, onExecute, onOpenDetails }) {
   const [base, quote] = splitSym(sig.symbol);
   const sl  = sig.price * (1 - sig.stop_loss_pct  / 100);
   const tp  = sig.price * (1 + sig.take_profit_pct / 100);
   const rr  = sig.stop_loss_pct > 0 ? (sig.take_profit_pct / sig.stop_loss_pct).toFixed(1) : '—';
+  
   const statusColor = { PENDING:'yellow', EXECUTED:'green', SKIPPED:'gray', EXPIRED:'red' }[sig.status] || 'gray';
   const ts = sig.timestamp ? new Date(sig.timestamp).toLocaleString('tr-TR',{dateStyle:'short',timeStyle:'short'}) : '—';
   
-  let glowClass = "border-cyan-900";
-  if (sig.stars === "⭐⭐⭐") {
-    glowClass = "border-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.15)]";
-  } else if (sig.stars === "⭐⭐") {
-    glowClass = "border-cyan-500 shadow-[0_0_12px_rgba(6,182,212,0.15)]";
-  }
+  // Full Sniper (Tüm zaman dilimleri yeşil) tespiti ve özel ışıma efekti
+  const isFullSniper = Array.isArray(sig.tf_statuses) && sig.tf_statuses.length > 0 && sig.tf_statuses.every(t => t.is_green);
   
+  let cardClass = "border-cyan-950/60 bg-gray-900/80 hover:border-cyan-500/80 hover:shadow-[0_0_15px_rgba(6,182,212,0.15)]";
+  let badgeStarsColor = "text-yellow-400";
+  
+  if (isFullSniper) {
+    cardClass = "border-amber-500/80 bg-gray-900/90 shadow-[0_0_20px_rgba(245,158,11,0.2)] hover:border-amber-400 hover:shadow-[0_0_25px_rgba(245,158,11,0.3)] border-2";
+    badgeStarsColor = "text-amber-300";
+  } else if (sig.stars === "⭐⭐⭐") {
+    cardClass = "border-emerald-500/80 bg-gray-900/80 shadow-[0_0_15px_rgba(16,185,129,0.15)] hover:border-emerald-400 hover:shadow-[0_0_20px_rgba(16,185,129,0.25)]";
+  } else if (sig.stars === "⭐⭐") {
+    cardClass = "border-cyan-500/80 bg-gray-900/80 shadow-[0_0_15px_rgba(6,182,212,0.1)] hover:border-cyan-400 hover:shadow-[0_0_20px_rgba(6,182,212,0.2)]";
+  }
+
+  // RSI status and colors
+  const rsiColor = sig.rsi_quality === 'ideal' ? 'text-green-400' : sig.rsi_quality === 'caution' ? 'text-red-400' : 'text-yellow-400';
+  const rsiDot = sig.rsi_quality === 'ideal' ? 'bg-green-500' : sig.rsi_quality === 'caution' ? 'bg-red-500' : 'bg-yellow-500';
+
+  // ADX status and colors
+  const adxColor = sig.adx_regime === 'trending' ? 'text-green-400' : sig.adx_regime === 'ranging' ? 'text-yellow-400' : 'text-gray-400';
+  const adxDot = sig.adx_regime === 'trending' ? 'bg-green-500' : 'bg-yellow-500';
+
   return (
-    <div className={`bg-gray-900 border ${glowClass} rounded-lg p-3 text-xs space-y-2 hover:border-cyan-400 transition-all cursor-pointer`}
-         onClick={() => onSelect && onSelect(sig.symbol)}>
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <div className="text-base font-bold text-white flex items-center gap-1">
-            🔥 {base}/<span className="text-cyan-400">{quote}</span>
+    <div 
+      className={`relative backdrop-blur-md rounded-xl p-4.5 flex flex-col justify-between gap-3 transition-all duration-300 cursor-pointer border ${cardClass}`}
+      onClick={() => onOpenDetails && onOpenDetails(sig)}
+    >
+      {/* Üst Kısım: Başlık, Status ve Yıldızlar */}
+      <div className="flex items-start justify-between">
+        <div className="space-y-1">
+          <div className="flex items-center gap-1.5">
+            <span className="flex h-2.5 w-2.5 relative">
+              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${isFullSniper ? 'bg-amber-400' : 'bg-cyan-400'}`}></span>
+              <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${isFullSniper ? 'bg-amber-500' : 'bg-cyan-500'}`}></span>
+            </span>
+            <span className="text-base font-bold text-white tracking-wide">
+              {base}<span className="text-cyan-400 font-semibold">/{quote}</span>
+            </span>
           </div>
-          <div className="text-[10px] text-gray-500 mt-0.5">{ts}</div>
+          <div className="text-[10px] text-gray-500 font-medium font-mono">{ts}</div>
         </div>
+
         <div className="flex flex-col items-end gap-1">
-          <Badge label={sig.status} color={statusColor} />
-          <span className="text-yellow-300 text-sm">{sig.stars || '⭐'}</span>
-          <span className="text-[10px] text-gray-400">{sig.star_label || sig.matched_pattern || '—'}</span>
+          <div className="flex items-center gap-1.5">
+            <Badge label={sig.status} color={statusColor} />
+            <span className={`text-xs font-bold font-mono tracking-wider ${badgeStarsColor}`}>
+              {sig.stars || '⭐'}
+            </span>
+          </div>
+          <span className="text-[9px] font-bold text-cyan-400 uppercase tracking-widest text-right mt-0.5">
+            {sig.star_label || sig.matched_pattern || 'GİRİŞ FIRSATI'}
+          </span>
         </div>
       </div>
-      <div className="grid grid-cols-3 gap-1 text-center">
-        <div className="bg-gray-800 rounded p-1.5">
-          <div className="text-gray-500 text-[9px]">Giriş</div>
-          <div className="text-white font-bold">{fmt(sig.price)}</div>
-        </div>
-        <div className="bg-red-950 border border-red-900 rounded p-1.5">
-          <div className="text-red-400 text-[9px]">Stop-Loss</div>
-          <div className="text-red-300 font-bold">{fmt(sl)}</div>
-          <div className="text-red-500 text-[9px]">-{fmt(sig.stop_loss_pct,1)}%</div>
-        </div>
-        <div className="bg-green-950 border border-green-900 rounded p-1.5">
-          <div className="text-green-400 text-[9px]">Hedef</div>
-          <div className="text-green-300 font-bold">{fmt(tp)}</div>
-          <div className="text-green-500 text-[9px]">+{fmt(sig.take_profit_pct,1)}%</div>
-        </div>
-      </div>
-      <div className="flex items-center justify-between">
+
+      {/* Sinyal Kalitesi & Mum Formasyonu Özel Rozeti */}
+      <div className="flex flex-wrap gap-1.5 items-center justify-between border-t border-cyan-950/40 pt-2 pb-1">
         <div className="flex items-center gap-1">
-          <span className="text-gray-500">OCC:</span>
-          <span className="text-cyan-300 font-bold">{sig.total_score}/{sig.max_score}p</span>
-          <div className="h-1.5 w-16 bg-gray-800 rounded-full overflow-hidden ml-1">
-            <div className="h-full bg-cyan-500 rounded-full" style={{width:`${Math.round((sig.total_score/sig.max_score)*100)}%`}} />
+          <span className="text-[10px] text-gray-400">Güven Puanı:</span>
+          <span className="text-cyan-300 font-extrabold font-mono text-xs">{sig.total_score}/{sig.max_score}p</span>
+          <div className="h-1.5 w-14 bg-gray-800/80 rounded-full overflow-hidden ml-1 border border-cyan-950/30">
+            <div 
+              className={`h-full rounded-full ${isFullSniper ? 'bg-amber-500' : 'bg-cyan-500'}`} 
+              style={{width:`${Math.round((sig.total_score/sig.max_score)*100)}%`}} 
+            />
           </div>
         </div>
-        <span className="text-gray-400">R:R <span className="text-white font-bold">1:{rr}</span></span>
+
+        {/* Dynamic Pattern / Sniper Badge */}
+        {sig.candlestick_pattern ? (
+          <div className="bg-amber-955/40 border border-amber-800/60 rounded px-2 py-0.5 text-[9px] font-bold text-amber-400 flex items-center gap-1 shadow-sm">
+            ✨ {sig.candlestick_pattern}
+          </div>
+        ) : isFullSniper ? (
+          <div className="bg-amber-500 border border-amber-400 text-gray-950 rounded px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-widest flex items-center gap-0.5 shadow-sm shadow-amber-500/20">
+            👑 FULL SNIPER
+          </div>
+        ) : null}
       </div>
+
+      {/* Görsel Risk:Reward (R:R) İlerleme Cetveli */}
+      <div className="space-y-1 bg-gray-950/40 border border-cyan-950/20 rounded-lg p-2">
+        <div className="flex justify-between text-[9px] text-gray-400 font-semibold font-mono">
+          <span className="text-red-400">SL (-{sig.stop_loss_pct.toFixed(1)}%)</span>
+          <span className="text-cyan-400">R:R 1:{rr}</span>
+          <span className="text-green-400">Hedef (+{sig.take_profit_pct.toFixed(1)}%)</span>
+        </div>
+        <div className="relative h-2 bg-gray-800 rounded-full border border-cyan-950/30 overflow-hidden flex">
+          <div className="h-full bg-red-500/40 border-r border-red-500/70" style={{ width: '25%' }} />
+          <div className="h-full bg-cyan-500/20" style={{ width: '35%' }} />
+          <div className="h-full bg-green-500/40 border-l border-green-500/70" style={{ width: '40%' }} />
+          {/* Giriş Noktası Göstergesi */}
+          <div className="absolute top-0 bottom-0 bg-white w-0.5 shadow-[0_0_4px_#fff]" style={{ left: '25%' }} />
+        </div>
+      </div>
+
+      {/* Sayısal Fiyat Değerleri Tablosu */}
+      <div className="grid grid-cols-3 gap-2">
+        <div className="bg-cyan-950/20 border border-cyan-900/30 rounded-lg p-2 text-center hover:bg-cyan-950/30 transition-colors">
+          <div className="text-cyan-400 text-[9px] font-semibold uppercase tracking-wider">GİRİŞ</div>
+          <div className="text-white font-extrabold font-mono text-sm mt-0.5">{fmt(sig.price)}</div>
+        </div>
+        <div className="bg-red-950/20 border border-red-900/30 rounded-lg p-2 text-center hover:bg-red-950/30 transition-colors">
+          <div className="text-red-400 text-[9px] font-semibold uppercase tracking-wider">STOP-LOSS</div>
+          <div className="text-red-300 font-extrabold font-mono text-sm mt-0.5">{fmt(sl)}</div>
+        </div>
+        <div className="bg-green-950/20 border border-green-900/30 rounded-lg p-2 text-center hover:bg-green-950/30 transition-colors">
+          <div className="text-green-400 text-[9px] font-semibold uppercase tracking-wider">HEDEF (TP)</div>
+          <div className="text-green-300 font-extrabold font-mono text-sm mt-0.5">{fmt(tp)}</div>
+        </div>
+      </div>
+
+      {/* Çoklu Zaman Dilimi OCC Isı Haritası */}
       <TfHeatmap tfStatuses={sig.tf_statuses} />
-      <div className="flex gap-3 text-[10px] text-gray-400 border-t border-gray-800 pt-1.5 items-center">
-        <span>RSI <span className={`font-bold ${sig.rsi_quality==='ideal'?'text-green-400':sig.rsi_quality==='caution'?'text-yellow-400':'text-cyan-300'}`}>{fmt(sig.rsi_value,1)}</span></span>
-        <span>ADX <span className={`font-bold ${sig.adx_regime==='trending'?'text-green-400':sig.adx_regime==='ranging'?'text-yellow-400':'text-gray-400'}`}>{fmt(sig.adx_value,1)}</span></span>
-        <span>Poz <span className="text-purple-300 font-bold">{fmt(sig.position_size_pct,0)}%</span></span>
-        
+
+      {/* Alt Göstergeler & Hızlı Aksiyon */}
+      <div className="flex gap-2.5 text-[10px] text-gray-400 border-t border-cyan-950/40 pt-2 items-center flex-wrap">
+        <div className="flex items-center gap-1">
+          <span className={`inline-block w-1.5 h-1.5 rounded-full ${rsiDot}`} />
+          <span>RSI: <span className={`font-bold font-mono ${rsiColor}`}>{fmt(sig.rsi_value, 1)}</span></span>
+        </div>
+        <div className="flex items-center gap-1">
+          <span className={`inline-block w-1.5 h-1.5 rounded-full ${adxDot}`} />
+          <span>ADX: <span className={`font-bold font-mono ${adxColor}`}>{fmt(sig.adx_value, 1)}</span></span>
+        </div>
+        <div className="flex items-center gap-1">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-purple-500" />
+          <span>Pay: <span className="text-purple-300 font-bold font-mono">{fmt(sig.position_size_pct, 0)}%</span></span>
+        </div>
+
         {sig.status === 'PENDING' && (
-          <button onClick={(e) => {
-            e.stopPropagation();
-            if (confirm(`${sig.symbol} sinyalini hemen manuel işleme almak istediğinize emin misiniz?`)) {
-              onExecute && onExecute(sig._id);
-            }
-          }}
-          className="ml-auto bg-cyan-950 border border-cyan-500 text-cyan-300 px-2 py-0.5 rounded hover:bg-cyan-900 transition-colors text-[9px] font-bold">
-            Hemen İşle
+          <button 
+            onClick={(e) => {
+              e.stopPropagation();
+              if (confirm(`${sig.symbol} sinyalini hemen manuel işleme almak istediğinize emin misiniz?`)) {
+                onExecute && onExecute(sig._id);
+              }
+            }}
+            className="ml-auto bg-cyan-950 hover:bg-cyan-900 border border-cyan-500/80 text-cyan-300 hover:text-white px-2.5 py-1 rounded-md transition-all text-[9px] font-bold tracking-wide shadow-sm active:scale-95 animate-pulse"
+          >
+            🚀 Hemen İşle
           </button>
         )}
       </div>
@@ -379,8 +517,30 @@ export default function App() {
   const [logs,           setLogs]           = useState([]);
   const [connected,      setConnected]      = useState(false);
   const [activeTab,      setActiveTab]      = useState('overview');   // overview | chart | scanner | log
-  const [chartSymbol,    setChartSymbol]    = useState('BTCUSDT');
+  const [chartSymbol,    setChartSymbol]    = useState('BTCTRY');
   const [chartInterval,  setChartInterval]  = useState('15m');
+  
+  // Premium Ses / Bildirim Ayarları State'leri
+  const [soundMuted, setSoundMuted] = useState(() => localStorage.getItem('jarvis_sound_muted') === 'true');
+  const [soundVolume, setSoundVolume] = useState(() => parseInt(localStorage.getItem('jarvis_sound_volume') ?? '80'));
+  const [soundPanelOpen, setSoundPanelOpen] = useState(false);
+
+  // Açık Pozisyon Koruma (SL/TP) Güncelleme State'leri
+  const [editingProtectionPos, setEditingProtectionPos] = useState(null);
+  const [tempSlPrice, setTempSlPrice] = useState('');
+  const [tempTpPrice, setTempTpPrice] = useState('');
+
+  // Detay Analiz Modalı İçin Seçili Sinyal
+  const [selectedSignalForModal, setSelectedSignalForModal] = useState(null);
+  
+  // Emir Gönderim Terminali (Order Panel) State'leri
+  const [orderSide, setOrderSide] = useState('LONG'); // LONG | SHORT
+  const [orderType, setOrderType] = useState('MARKET'); // MARKET | LIMIT
+  const [orderPrice, setOrderPrice] = useState('');
+  const [orderQty, setOrderQty] = useState('');
+  const [orderLeverage, setOrderLeverage] = useState(1);
+  const [orderSlPct, setOrderSlPct] = useState('2.0');
+  const [orderTpPct, setOrderTpPct] = useState('4.0');
   
   // Canlı Log Arama ve Seviye Filtreleme
   const [logSearch,      setLogSearch]      = useState('');
@@ -392,6 +552,9 @@ export default function App() {
   const [openOrders,     setOpenOrders]     = useState([]);
   const [income,         setIncome]         = useState({ items: [], totalPnl: 0 });
   const [ticker,         setTicker]         = useState(null);
+  const [binanceApiError, setBinanceApiError] = useState(null);
+  const [quoteAsset,     setQuoteAsset]     = useState('TRY');
+  const [maxBudget,      setMaxBudget]      = useState(500);
 
   // MongoDB verisi
   const [recentSignals,  setRecentSignals]  = useState([]);
@@ -409,6 +572,17 @@ export default function App() {
 
   const logEndRef = useRef(null);
   const prevSignalsLengthRef = useRef(0);
+
+  // Ses ayar panelinin dışına tıklandığında kapanması için click-outside hook'u
+  useEffect(() => {
+    const clickOutside = (e) => {
+      if (soundPanelOpen && !e.target.closest('.sound-panel-container')) {
+        setSoundPanelOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', clickOutside);
+    return () => document.removeEventListener('mousedown', clickOutside);
+  }, [soundPanelOpen]);
 
   // Premium fütüristik stil enjeksiyonu (Glassmorphism & Neon Borders)
   useEffect(() => {
@@ -498,6 +672,108 @@ export default function App() {
     });
   };
 
+  // Açık Pozisyon Yönünü Borsada Anında Market Emirle Tersine Çevir (Reverse)
+  const handleReversePosition = (symbol, quantity, side) => {
+    if (!confirm(`🚨 ${symbol} pozisyonunu piyasa fiyatından kapatıp, ters yönde (${side === 'LONG' ? 'SHORT' : 'LONG'}) aynı büyüklükte yeni işlem açmak istediğinize emin misiniz?`)) return;
+    
+    fetch(`${API_URL}/api/positions/reverse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol, quantity, side })
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.success) {
+        playFuturisticChime();
+        alert(`🔄 Yön başarıyla tersine çevrildi!`);
+        fetchAll();
+      } else {
+        alert('Hata: ' + (data.error || 'Pozisyon yönü çevrilemedi.'));
+      }
+    })
+    .catch(err => {
+      alert('Bağlantı hatası: ' + err.message);
+    });
+  };
+
+  // Açık Pozisyon Koruma (SL/TP) Seviyelerini Veritabanında Güncelle
+  const handleUpdateProtection = () => {
+    if (!editingProtectionPos) return;
+    
+    fetch(`${API_URL}/api/positions/update-protection`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        symbol: editingProtectionPos.symbol,
+        stopLossPrice: tempSlPrice || null,
+        takeProfitPrice: tempTpPrice || null
+      })
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.success) {
+        playFuturisticChime();
+        alert('🛡️ Koruma (SL/TP) seviyeleri başarıyla güncellendi!');
+        setEditingProtectionPos(null);
+        fetchAll();
+      } else {
+        alert('Hata: ' + (data.error || 'Koruma güncellenemedi.'));
+      }
+    })
+    .catch(err => {
+      alert('Bağlantı hatası: ' + err.message);
+    });
+  };
+
+  // Manuel Emir Gönder (Borsa Terminali Entegrasyonu)
+  const handlePlaceManualOrder = () => {
+    if (!orderQty || parseFloat(orderQty) <= 0) {
+      alert('Lütfen geçerli bir miktar girin.');
+      return;
+    }
+    if (orderType === 'LIMIT' && (!orderPrice || parseFloat(orderPrice) <= 0)) {
+      alert('Limit emir için lütfen geçerli bir fiyat girin.');
+      return;
+    }
+
+    const side = orderSide === 'LONG' ? 'BUY' : 'SELL';
+    const positionSide = orderSide;
+
+    const confirmMsg = `🚨 ${chartSymbol} paritesinde SPOT (1x) ile ${orderQty} miktarında ${orderType} ${orderSide === 'LONG' ? 'ALIM (BUY)' : 'SATIM (SELL)'} emri göndermek istediğinize emin misiniz?`;
+    if (!confirm(confirmMsg)) return;
+
+    fetch(`${API_URL}/api/orders/place`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbol: chartSymbol,
+        side,
+        positionSide,
+        type: orderType,
+        quantity: orderQty,
+        price: orderType === 'LIMIT' ? orderPrice : undefined,
+        leverage: orderLeverage,
+        stopLossPct: orderSlPct || '0',
+        takeProfitPct: orderTpPct || '0'
+      })
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.success) {
+        playFuturisticChime();
+        alert('🎯 Manuel emir başarıyla borsaya iletildi!');
+        setOrderQty('');
+        if (orderType === 'LIMIT') setOrderPrice('');
+        fetchAll();
+      } else {
+        alert('Hata: ' + (data.error || 'Emir gönderilemedi.'));
+      }
+    })
+    .catch(err => {
+      alert('Bağlantı hatası: ' + err.message);
+    });
+  };
+
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior:'smooth' }); }, [logs]);
 
   // ─ Veri çekme ────────────────────────────────────────────────────────────
@@ -507,11 +783,18 @@ export default function App() {
       .then(r => r.json())
       .then(d => {
         if (d) {
-          if (d.balance) setBalance(d.balance);
+          setBalance(d.balance || null);
+          if (d.balance && d.balance.quoteAsset) {
+            setQuoteAsset(d.balance.quoteAsset);
+          }
+          if (d.balance && d.balance.maxBudget) {
+            setMaxBudget(d.balance.maxBudget);
+          }
           if (d.positions) setBinPositions(d.positions);
           if (d.openOrders) setOpenOrders(d.openOrders);
           if (d.income) setIncome(d.income);
           if (d.ticker) setTicker(d.ticker);
+          setBinanceApiError(d.binanceApiError || null);
         }
       })
       .catch(err => console.error("Dashboard fetch error:", err));
@@ -609,6 +892,7 @@ export default function App() {
       if (mkSearch) return t.symbol.toLowerCase().includes(mkSearch.toLowerCase());
       if (mkFilter === 'gainers') return t.priceChangePct > 0;
       if (mkFilter === 'losers')  return t.priceChangePct < 0;
+      if (mkFilter === 'high_vol') return t.quoteVolume >= 1000000;
       return true;
     })
     .sort((a, b) => mkSort.dir * (b[mkSort.col] - a[mkSort.col]));
@@ -632,8 +916,8 @@ export default function App() {
         <div className="flex items-center gap-3">
           <TrendingUp size={18} className="text-cyan-400" />
           <div>
-            <div className="text-xs font-bold tracking-widest text-cyan-300 uppercase">JARVIS // Binance Futures Monitor</div>
-            <div className="text-[10px] text-gray-500">USDT-M Perpetual · fapi.binance.com</div>
+            <div className="text-xs font-bold tracking-widest text-cyan-300 uppercase">JARVIS // Binance.TR Spot Terminal</div>
+            <div className="text-[10px] text-gray-500">{quoteAsset} Spot · www.binance.tr</div>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -660,6 +944,68 @@ export default function App() {
             }`}/>
             {latency !== null ? `${latency}ms` : '—ms'}
           </div>
+          {/* Fütüristik Ses Kontrol Dropdown */}
+          <div className="relative sound-panel-container flex items-center">
+            <button 
+              onClick={() => setSoundPanelOpen(o => !o)} 
+              className={`p-1.5 border rounded hover:border-cyan-500 transition-colors flex items-center justify-center cursor-pointer ${
+                soundMuted ? 'border-red-950 text-red-400 bg-red-950/20' : 'border-cyan-900 text-cyan-400'
+              }`}
+              title="Ses Efektleri Ayarı"
+            >
+              {soundMuted ? <VolumeX size={13} /> : <Volume2 size={13} />}
+            </button>
+            
+            {soundPanelOpen && (
+              <div className="absolute right-0 top-full mt-2 z-50 p-3 bg-gray-900 border border-cyan-800 rounded-lg shadow-2xl w-48 glass-panel font-mono text-[10px] space-y-3">
+                <div className="flex items-center justify-between border-b border-cyan-950 pb-1.5">
+                  <span className="font-bold text-cyan-300 uppercase tracking-wider">BİLDİRİM SESİ</span>
+                  <button 
+                    onClick={() => {
+                      const next = !soundMuted;
+                      setSoundMuted(next);
+                      localStorage.setItem('jarvis_sound_muted', next.toString());
+                    }}
+                    className={`px-1.5 py-0.5 rounded border text-[9px] font-bold cursor-pointer ${
+                      soundMuted ? 'bg-red-950 border-red-800 text-red-400' : 'bg-green-950 border-green-800 text-green-400'
+                    }`}
+                  >
+                    {soundMuted ? 'KAPALI' : 'AÇIK'}
+                  </button>
+                </div>
+                
+                <div className="space-y-1">
+                  <div className="flex justify-between text-gray-500">
+                    <span>SES DÜZEYİ</span>
+                    <span className="text-white font-bold">{soundVolume}%</span>
+                  </div>
+                  <input 
+                    type="range" 
+                    min="0" 
+                    max="100" 
+                    value={soundVolume}
+                    disabled={soundMuted}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value);
+                      setSoundVolume(val);
+                      localStorage.setItem('jarvis_sound_volume', val.toString());
+                    }}
+                    className="w-full accent-cyan-400 h-1 bg-gray-800 rounded outline-none cursor-pointer"
+                  />
+                </div>
+
+                <button 
+                  onClick={() => {
+                    playFuturisticChime();
+                  }}
+                  className="w-full py-1 border border-cyan-800 rounded hover:bg-cyan-950 text-cyan-300 font-bold hover:border-cyan-500 transition-colors uppercase text-[9px] cursor-pointer"
+                >
+                  🔊 TEST SESİ ÇAL
+                </button>
+              </div>
+            )}
+          </div>
+
           <div className={`flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded border ${connected?'border-green-700 text-green-400':'border-red-800 text-red-400'}`}>
             {connected ? <Wifi size={11}/> : <WifiOff size={11}/>}
             {connected ? 'ONLINE' : 'OFFLINE'}
@@ -681,12 +1027,34 @@ export default function App() {
       {activeTab === 'overview' && (
         <div className="space-y-3">
 
+          {binanceApiError && (
+            <div className="bg-red-950/20 border border-red-500 rounded-lg p-4 font-mono text-xs space-y-2 text-red-400 shadow-[0_0_15px_rgba(239,68,68,0.15)] animate-pulse">
+              <div className="flex items-center gap-2 text-red-400 font-bold uppercase tracking-wider text-sm">
+                <span>⚠️ BİNANCE.TR API BAĞLANTI HATASI</span>
+              </div>
+              <p className="text-gray-300">
+                Binance.TR borsasından canlı cüzdan bakiyeniz, açık pozisyonlarınız ve aktif emirleriniz çekilemedi.
+              </p>
+              <div className="bg-black/50 border border-red-950 p-2.5 rounded font-mono text-[11px] text-red-300 select-all whitespace-pre-wrap">
+                {binanceApiError}
+              </div>
+              <div className="text-[10px] text-gray-500 pt-1 leading-relaxed">
+                <strong>Olası Sebepler & Çözüm Adımları:</strong>
+                <ol className="list-decimal pl-4 space-y-1 mt-1">
+                  <li>API Anahtarlarınız yanlış veya eksik olabilir. Lütfen <code>.env</code> dosyanızdaki <strong>BINANCE_API_KEY</strong> ve <strong>BINANCE_API_SECRET</strong> alanlarını kontrol edin.</li>
+                  <li>Binance.TR API anahtarınızda <strong>"Enable Spot Trading" (Spot Alım Satımı Etkinleştir)</strong> yetkisinin açık olduğundan emin olun.</li>
+                  <li>API anahtarınızda IP kısıtlaması aktifse, borsa isteklerinin engellenmemesi için sunucunun dış IP adresinin Binance.TR üzerinde beyaz listeye (whitelist) eklenmesi gerekir.</li>
+                </ol>
+              </div>
+            </div>
+          )}
+
           {/* Bakiye Kartları */}
           <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-            <StatCard icon={DollarSign} label="Cüzdan Bakiyesi"    value={balance ? fmt(balance.walletBalance,2)+' $'    : '…'} color="text-cyan-400" />
-            <StatCard icon={DollarSign} label="Kullanılabilir"      value={balance ? fmt(balance.availableBalance,2)+' $' : '…'} color="text-green-400" />
-            <StatCard icon={TrendingUp} label="Gerçekleşmemiş PnL"  value={balance ? fmt(balance.unrealizedPnl,2)+' $'    : '…'} color={balance ? pnlColor(balance.unrealizedPnl) : 'text-gray-400'} />
-            <StatCard icon={Activity}   label="7G Gerçekleşen PnL"  value={fmt(income.totalPnl,2)+' $'} color={pnlColor(income.totalPnl)} />
+            <StatCard icon={Wallet} label={`Cüzdan Bakiyesi (${quoteAsset})`}    value={balance ? fmt(balance.walletBalance,2) + (quoteAsset === 'TRY' ? ' ₺' : ' $') : '…'} color="text-cyan-400" />
+            <StatCard icon={Coins} label={`Kullanılabilir (${quoteAsset})`}      value={balance ? fmt(balance.availableBalance,2) + (quoteAsset === 'TRY' ? ' ₺' : ' $') : '…'} color="text-green-400" />
+            <StatCard icon={TrendingUp} label="Gerçekleşmemiş PnL"  value={balance ? fmt(balance.unrealizedPnl,2) + (quoteAsset === 'TRY' ? ' ₺' : ' $') : '…'} color={balance ? pnlColor(balance.unrealizedPnl) : 'text-gray-400'} />
+            <StatCard icon={Activity}   label="7G Gerçekleşen PnL"  value={fmt(income.totalPnl,2) + (quoteAsset === 'TRY' ? ' ₺' : ' $')} color={pnlColor(income.totalPnl)} />
             <StatCard icon={Briefcase}  label="Açık Pozisyon"       value={binPositions.length} color="text-purple-400" />
           </div>
 
@@ -701,14 +1069,14 @@ export default function App() {
           {/* PnL Grafiği */}
           {income.items?.length > 0 && (
             <div className="bg-gray-900 border border-cyan-900 rounded-lg p-4">
-              <SectionHeader icon={TrendingUp} title="7 Günlük Kümülatif PnL (USDT)" />
+              <SectionHeader icon={TrendingUp} title={`7 Günlük Kümülatif PnL (${quoteAsset})`} />
               <PnlSparkline items={income.items} />
             </div>
           )}
 
           {/* Binance Açık Pozisyonlar */}
           <div className="bg-gray-900 border border-cyan-900 rounded-lg p-4">
-            <SectionHeader icon={Briefcase} title={`Binance Futures Açık Pozisyonlar (${binPositions.length})`} />
+            <SectionHeader icon={Briefcase} title={`Açık Pozisyonlar (${binPositions.length})`} />
             {binPositions.length === 0
               ? <p className="text-xs text-gray-600 text-center py-4">Açık pozisyon yok.</p>
               : (
@@ -716,33 +1084,56 @@ export default function App() {
                   <table className="w-full text-xs">
                     <thead><tr className="text-gray-500 border-b border-gray-800 text-[10px]">
                       <th className="text-left py-1.5 pr-3">PARİTE</th>
-                      <th className="text-right pr-3">YÖN</th>
+                      <th className="text-right pr-3">YILDIZ</th>
                       <th className="text-right pr-3">MİKTAR</th>
-                      <th className="text-right pr-3">GİRİŞ</th>
-                      <th className="text-right pr-3">MARK</th>
-                      <th className="text-right pr-3">LİK. FİYAT</th>
-                      <th className="text-right pr-3">MARGIN</th>
-                      <th className="text-right pr-3">UNREALIZED PNL</th>
-                      <th className="text-right">İŞLEM</th>
+                      <th className="text-right pr-3">ALIM FİYATI</th>
+                      <th className="text-right pr-3">GÜNCEL FİYAT</th>
+                      <th className="text-right pr-3">ALINAN DEĞER</th>
+                      <th className="text-right pr-3">PNL (TL)</th>
+                      <th className="text-right pr-3">PNL %</th>
+                      <th className="text-right pr-3">STOP-LOSS</th>
+                      <th className="text-right pr-3">HEDEF (TP)</th>
+                      <th className="text-right">İŞLEMLER</th>
                     </tr></thead>
                     <tbody>
                       {binPositions.map((p, i) => {
-                        const qty  = parseFloat(p.positionAmt);
-                        const upnl = parseFloat(p.unRealizedProfit);
-                        const side = qty > 0 ? 'LONG' : 'SHORT';
+                        const qty   = parseFloat(p.positionAmt);
+                        const upnl  = parseFloat(p.unRealizedProfit);
+                        const pnlP  = parseFloat(p.pnlPct || 0);
+                        const side  = qty > 0 ? 'LONG' : 'SHORT';
+                        const sl    = p.stop_loss_price;
+                        const tp    = p.take_profit_price;
+                        const entry = parseFloat(p.entryPrice);
+                        const mark  = parseFloat(p.markPrice);
+
                         return (
                           <tr key={i} className="border-b border-gray-800 hover:bg-gray-800">
                             <td className="py-1.5 pr-3 text-white font-bold">{p.symbol}</td>
-                            <td className="text-right pr-3"><Badge label={side} color={side==='LONG'?'green':'red'} /></td>
+                            <td className="text-right pr-3 text-yellow-400 text-[11px]">{p.stars || '—'}</td>
                             <td className="text-right pr-3 text-cyan-300">{Math.abs(qty)}</td>
-                            <td className="text-right pr-3">{fmt(parseFloat(p.entryPrice),4)}</td>
-                            <td className="text-right pr-3">{fmt(parseFloat(p.markPrice),4)}</td>
-                            <td className="text-right pr-3 text-red-400">{fmt(parseFloat(p.liquidationPrice),4)}</td>
-                            <td className="text-right pr-3">{fmt(parseFloat(p.isolatedMargin||p.positionInitialMargin),2)}</td>
-                            <td className={`text-right font-bold pr-3 ${pnlColor(upnl)}`}>{fmt(upnl,4)} $</td>
-                            <td className="text-right">
+                            <td className="text-right pr-3 text-blue-300 font-mono">{fmt(entry, 4)}</td>
+                            <td className="text-right pr-3 font-mono font-bold">{fmt(mark, 4)}</td>
+                            <td className="text-right pr-3 text-cyan-100">{fmt(parseFloat(p.allocated_budget || 0), 2)} {quoteAsset === 'TRY' ? '₺' : '$'}</td>
+                            <td className={`text-right font-bold pr-3 ${pnlColor(upnl)}`}>{upnl >= 0 ? '+' : ''}{fmt(upnl, 2)} {quoteAsset === 'TRY' ? '₺' : '$'}</td>
+                            <td className={`text-right font-bold pr-3 ${pnlColor(pnlP)}`}>{pnlP >= 0 ? '+' : ''}{pnlP}%</td>
+                            <td className="text-right pr-3 font-mono">
+                              {sl ? <span className="text-red-400">{fmt(sl, 4)}</span> : <span className="text-gray-600">—</span>}
+                            </td>
+                            <td className="text-right pr-3 font-mono">
+                              {tp ? <span className="text-green-400">{fmt(tp, 4)}</span> : <span className="text-gray-600">—</span>}
+                            </td>
+                            <td className="text-right space-x-1 py-1">
+                              <button onClick={() => {
+                                setEditingProtectionPos(p);
+                                const dbPos = dbPositions.find(x => x.symbol === p.symbol && x.status === 'OPEN');
+                                setTempSlPrice(sl || dbPos?.stop_loss_price || '');
+                                setTempTpPrice(tp || dbPos?.take_profit_price || '');
+                              }}
+                              className="bg-cyan-950 border border-cyan-800 text-cyan-300 px-2 py-0.5 rounded hover:bg-cyan-900 transition-colors text-[10px] font-bold cursor-pointer inline-flex items-center gap-0.5">
+                                <Shield size={10} /> Koruma
+                              </button>
                               <button onClick={() => handleClosePosition(p.symbol, Math.abs(qty), side)}
-                                      className="bg-red-950 border border-red-800 text-red-400 px-2 py-0.5 rounded hover:bg-red-900 transition-colors text-[10px] font-bold">
+                                      className="bg-red-950 border border-red-800 text-red-400 px-2 py-0.5 rounded hover:bg-red-900 transition-colors text-[10px] font-bold cursor-pointer inline-flex items-center gap-0.5">
                                 Kapat
                               </button>
                             </td>
@@ -831,16 +1222,21 @@ export default function App() {
       )}
 
       {/* ════════════════ CHART & EMİR DEFTERİ SEKMESİ ════════════════ */}
-      {activeTab === 'chart' && (
-        <div className="flex flex-col gap-2" style={{ height: 'calc(100vh - 130px)' }}>
+      <div 
+        className={activeTab === 'chart' ? "flex flex-col gap-2" : "flex flex-col gap-2 absolute pointer-events-none"} 
+        style={activeTab === 'chart' 
+          ? { height: 'calc(100vh - 130px)' } 
+          : { height: 'calc(100vh - 130px)', width: 'calc(100vw - 24px)', left: '-99999px', top: '-99999px', opacity: 0 }
+        }
+      >
 
           {/* Toolbar */}
           <div className="flex gap-2 flex-wrap items-center bg-gray-900 border border-cyan-900 rounded-lg px-3 py-2">
-            <SymbolSearch symbols={allSymbols} value={chartSymbol} onChange={s => setChartSymbol(s)} />
+            <SymbolSearch symbols={allSymbols} value={chartSymbol} onChange={s => setChartSymbol(s)} quoteAsset={quoteAsset} />
             <div className="flex gap-1">
               {INTERVALS.map(iv => (
                 <button key={iv} onClick={() => setChartInterval(iv)}
-                  className={`px-2.5 py-1 text-[11px] rounded border transition-colors ${
+                  className={`px-2.5 py-1 text-[11px] rounded border transition-colors cursor-pointer ${
                     chartInterval===iv ? 'bg-cyan-900 border-cyan-600 text-cyan-200 font-bold' : 'border-gray-700 text-gray-500 hover:border-cyan-800'
                   }`}>
                   {iv}
@@ -858,136 +1254,303 @@ export default function App() {
             )}
           </div>
 
-          {/* Chart + Order Book */}
+          {/* Chart + Order Book + Emir Terminali */}
           <div className="flex gap-2 flex-1 min-h-0">
             {/* TradingView Chart */}
             <div className="flex-1 min-w-0 bg-gray-950 border border-cyan-900 rounded-lg overflow-hidden">
               <TradingViewChart symbol={chartSymbol} interval={chartInterval} />
             </div>
 
-            {/* Order Book — sağ panel */}
-            <div className="w-64 shrink-0 bg-gray-900 border border-cyan-900 rounded-lg p-3 overflow-y-auto">
+            {/* Order Book — orta panel */}
+            <div className="w-56 shrink-0 bg-gray-900 border border-cyan-900 rounded-lg p-3 overflow-y-auto">
               <SectionHeader icon={BookOpen} title={`Order Book`} />
               <OrderBook symbol={chartSymbol} />
             </div>
-          </div>
-        </div>
-      )}
 
-      {/* ════════════════ PİYASA SEKMESİ ════════════════ */}
-      {activeTab === 'market' && (
-        <div className="bg-gray-900 border border-cyan-900 rounded-lg p-4 space-y-3">
+            {/* Emir Gönderim Terminali — Sağ Panel */}
+            <div className="w-72 shrink-0 bg-gray-900 border border-cyan-900 rounded-lg p-3 overflow-y-auto space-y-4 flex flex-col justify-between h-full font-mono text-xs">
+              <div className="space-y-4">
+                <SectionHeader icon={Sliders} title="Emir Terminali" />
+                
+                {/* Yön Seçimi LONG/SHORT -> SPOT ALIM/SATIM */}
+                <div className="grid grid-cols-2 gap-2">
+                  <button 
+                    onClick={() => setOrderSide('LONG')}
+                    className={`py-2 rounded border font-bold text-center transition-all cursor-pointer ${
+                      orderSide === 'LONG' 
+                        ? 'bg-green-950 border-green-500 text-green-400 shadow-[0_0_10px_rgba(34,197,94,0.25)] border-2' 
+                        : 'border-gray-800 text-gray-500 hover:text-gray-400'
+                    }`}
+                  >
+                    🟢 SPOT BUY (ALIM)
+                  </button>
+                  <button 
+                    onClick={() => setOrderSide('SHORT')}
+                    className={`py-2 rounded border font-bold text-center transition-all cursor-pointer ${
+                      orderSide === 'SHORT' 
+                        ? 'bg-red-950 border-red-500 text-red-400 shadow-[0_0_10px_rgba(239,68,68,0.25)] border-2' 
+                        : 'border-gray-800 text-gray-500 hover:text-gray-400'
+                    }`}
+                  >
+                    🔴 SPOT SELL (SATIM)
+                  </button>
+                </div>
 
-          {/* Özet istatistikler */}
-          <div className="grid grid-cols-3 gap-2">
-            <div className="bg-gray-800 rounded-lg p-3 text-center">
-              <div className="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Toplam Parite</div>
-              <div className="text-xl font-bold text-cyan-300">{allTickers.length}</div>
-              <div className="text-[10px] text-gray-500">USDT-M Perpetual</div>
-            </div>
-            <div className="bg-green-950 border border-green-900 rounded-lg p-3 text-center">
-              <div className="text-[10px] text-green-600 uppercase tracking-widest mb-1">Yükselen</div>
-              <div className="text-xl font-bold text-green-400">{gainersCount}</div>
-              <div className="text-[10px] text-green-700">{allTickers.length ? Math.round(gainersCount/allTickers.length*100) : 0}% coin</div>
-            </div>
-            <div className="bg-red-950 border border-red-900 rounded-lg p-3 text-center">
-              <div className="text-[10px] text-red-700 uppercase tracking-widest mb-1">Düşen</div>
-              <div className="text-xl font-bold text-red-400">{losersCount}</div>
-              <div className="text-[10px] text-red-800">{allTickers.length ? Math.round(losersCount/allTickers.length*100) : 0}% coin</div>
-            </div>
-          </div>
+                {/* Emir Türü MARKET/LIMIT */}
+                <div className="flex bg-gray-950 border border-cyan-950 rounded p-0.5">
+                  <button 
+                    onClick={() => setOrderType('MARKET')}
+                    className={`flex-1 py-1 rounded text-[10px] font-bold text-center transition-colors cursor-pointer ${
+                      orderType === 'MARKET' ? 'bg-cyan-955 text-cyan-300' : 'text-gray-500 hover:text-gray-400'
+                    }`}
+                  >
+                    PIYASA (MARKET)
+                  </button>
+                  <button 
+                    onClick={() => setOrderType('LIMIT')}
+                    className={`flex-1 py-1 rounded text-[10px] font-bold text-center transition-colors cursor-pointer ${
+                      orderType === 'LIMIT' ? 'bg-cyan-955 text-cyan-300' : 'text-gray-500 hover:text-gray-400'
+                    }`}
+                  >
+                    LIMIT EMIR
+                  </button>
+                </div>
 
-          {/* Arama + Filtre */}
-          <div className="flex gap-2 flex-wrap items-center">
-            <div className="relative">
-              <Search size={12} className="absolute left-2.5 top-2 text-gray-500" />
-              <input
-                type="text"
-                placeholder="BTC, ETH, SOL..."
-                value={mkSearch}
-                onChange={e => { setMkSearch(e.target.value); setMkFilter('all'); }}
-                className="bg-gray-800 border border-gray-700 text-cyan-300 text-xs rounded pl-7 pr-3 py-1.5 w-44 focus:border-cyan-600 outline-none"
-              />
-            </div>
-            {['all','gainers','losers'].map(f => (
-              <button key={f} onClick={() => { setMkFilter(f); setMkSearch(''); }}
-                className={`px-3 py-1.5 text-[11px] rounded border font-bold transition-colors ${
-                  mkFilter===f && !mkSearch
-                    ? f==='gainers' ? 'bg-green-950 border-green-700 text-green-400'
-                      : f==='losers' ? 'bg-red-950 border-red-800 text-red-400'
-                      : 'bg-cyan-950 border-cyan-700 text-cyan-300'
-                    : 'border-gray-700 text-gray-500 hover:border-gray-600'
-                }`}>
-                {f==='all' ? 'Tümü' : f==='gainers' ? '▲ Yükselen' : '▼ Düşen'}
-              </button>
-            ))}
-            <span className="ml-auto text-[10px] text-gray-600">{mkFiltered.length} sonuç · 3s güncelleme</span>
-          </div>
+                {/* Limit Fiyatı (Sadece LIMIT için aktif) */}
+                {orderType === 'LIMIT' && (
+                  <div className="space-y-1">
+                    <label className="text-[10px] text-gray-500 uppercase tracking-wider">LIMIT FİYAT ({quoteAsset})</label>
+                    <input 
+                      type="number" 
+                      step="any"
+                      value={orderPrice}
+                      onChange={(e) => setOrderPrice(e.target.value)}
+                      placeholder={ticker ? parseFloat(ticker.lastPrice).toString() : "Fiyat girin..."}
+                      className="w-full bg-gray-955 border border-cyan-950 text-cyan-200 text-xs rounded px-2.5 py-1.5 focus:border-cyan-600 outline-none font-mono font-bold"
+                    />
+                  </div>
+                )}
 
-          {/* Tablo */}
-          {allTickers.length === 0
-            ? <p className="text-xs text-gray-600 text-center py-10">Veriler yükleniyor…</p>
-            : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="text-gray-500 border-b border-gray-800 text-[10px] sticky top-0 bg-gray-900">
-                      <th className="text-left py-2 pr-2 w-6">#</th>
-                      <th className="text-left pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('symbol')}>
-                        PARİTE {mkSort.col==='symbol' ? (mkSort.dir===1 ? <ArrowUp size={9} className="inline"/> : <ArrowDown size={9} className="inline"/>) : null}
-                      </th>
-                      <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('lastPrice')}>
-                        FİYAT {mkSort.col==='lastPrice' ? (mkSort.dir===1 ? <ArrowUp size={9} className="inline"/> : <ArrowDown size={9} className="inline"/>) : null}
-                      </th>
-                      <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('priceChangePct')}>
-                        24s % {mkSort.col==='priceChangePct' ? (mkSort.dir===1 ? <ArrowUp size={9} className="inline"/> : <ArrowDown size={9} className="inline"/>) : null}
-                      </th>
-                      <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('highPrice')}>
-                        24s YÜKSEK
-                      </th>
-                      <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('lowPrice')}>
-                        24s DÜŞÜK
-                      </th>
-                      <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('quoteVolume')}>
-                        HACİM (M$) {mkSort.col==='quoteVolume' ? (mkSort.dir===1 ? <ArrowUp size={9} className="inline"/> : <ArrowDown size={9} className="inline"/>) : null}
-                      </th>
-                      <th className="text-right cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('count')}>
-                        İŞLEM
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {mkFiltered.slice(0, 300).map((t, i) => {
-                      const isPos = t.priceChangePct >= 0;
-                      const priceDec = t.lastPrice >= 1000 ? 2 : t.lastPrice >= 1 ? 4 : 6;
-                      return (
-                        <tr key={t.symbol}
-                          className="border-b border-gray-800 hover:bg-gray-800 cursor-pointer"
-                          onClick={() => { setChartSymbol(t.symbol); setActiveTab('chart'); }}>
-                          <td className="py-1.5 pr-2 text-gray-600">{i+1}</td>
-                          <td className="pr-3 font-bold text-white">
-                            {t.symbol.replace('USDT','')}
-                            <span className="text-gray-600 font-normal">/USDT</span>
-                          </td>
-                          <td className="text-right pr-3 font-mono text-cyan-200">{t.lastPrice.toFixed(priceDec)}</td>
-                          <td className={`text-right pr-3 font-bold ${isPos ? 'text-green-400' : 'text-red-400'}`}>
-                            <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] ${isPos ? 'bg-green-950' : 'bg-red-950'}`}>
-                              {isPos ? '+' : ''}{t.priceChangePct.toFixed(2)}%
-                            </span>
-                          </td>
-                          <td className="text-right pr-3 text-green-600 font-mono">{t.highPrice.toFixed(priceDec)}</td>
-                          <td className="text-right pr-3 text-red-700 font-mono">{t.lowPrice.toFixed(priceDec)}</td>
-                          <td className="text-right pr-3 text-yellow-500">{(t.quoteVolume/1e6).toFixed(1)}M</td>
-                          <td className="text-right text-gray-500">{t.count >= 1000 ? (t.count/1000).toFixed(0)+'K' : t.count}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                {/* Miktar */}
+                <div className="space-y-1">
+                  <div className="flex justify-between">
+                    <label className="text-[10px] text-gray-500 uppercase tracking-wider">MİKTAR ({chartSymbol.replace(quoteAsset,'')})</label>
+                    {balance && (
+                      <span className="text-[9px] text-gray-500">Bakiye: <span className="text-white font-bold">{fmt(balance.availableBalance,2)} {quoteAsset === 'TRY' ? '₺' : '$'}</span></span>
+                    )}
+                  </div>
+                  <input 
+                    type="number" 
+                    step="any"
+                    value={orderQty}
+                    onChange={(e) => setOrderQty(e.target.value)}
+                    placeholder="Miktar girin..."
+                    className="w-full bg-gray-955 border border-cyan-950 text-cyan-200 text-xs rounded px-2.5 py-1.5 focus:border-cyan-600 outline-none font-mono font-bold"
+                  />
+                  
+                  {/* Yüzdelik Bakiye Seçiciler */}
+                  <div className="grid grid-cols-4 gap-1 pt-1">
+                    {[10, 25, 50, 100].map(pct => (
+                      <button 
+                        key={pct}
+                        onClick={() => {
+                          if (!balance || !ticker) return;
+                          const budget = balance.availableBalance * (pct / 100);
+                          const lastPrice = parseFloat(ticker.lastPrice || 1);
+                          const rawQty = budget / lastPrice;
+                          const formattedQty = Math.max(Math.round(rawQty * 1000) / 1000, 0.001);
+                          setOrderQty(formattedQty.toString());
+                        }}
+                        className="py-1 bg-gray-950 border border-gray-800 rounded text-gray-400 hover:border-cyan-800 hover:text-cyan-300 text-[9px] font-bold transition-all cursor-pointer"
+                      >
+                        %{pct}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Kaldıraç Göstergesi (Spot Modu) */}
+                <div className="space-y-1 bg-gray-950/40 border border-cyan-950/20 p-2 rounded text-center">
+                  <div className="flex justify-between text-[10px] text-gray-500">
+                    <span className="uppercase tracking-wider">İşlem Tipi</span>
+                    <span className="text-cyan-400 font-bold">SPOT (1x Kaldıraçsız)</span>
+                  </div>
+                </div>
+
+                {/* SL/TP Koruma Ayarları */}
+                <div className="border-t border-cyan-950/40 pt-3 space-y-2.5">
+                  <div className="text-[10px] text-gray-400 font-bold uppercase tracking-wider flex items-center gap-1">
+                    <Shield size={11} className="text-cyan-500" /> KORUMA (%)
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <label className="text-[8px] text-gray-500">STOP LOSS (SL %)</label>
+                      <input 
+                        type="number" 
+                        step="0.1"
+                        value={orderSlPct}
+                        onChange={(e) => setOrderSlPct(e.target.value)}
+                        placeholder="Örn: 2.0"
+                        className="w-full bg-gray-955 border border-cyan-950 text-red-400 text-xs rounded px-2.5 py-1.5 focus:border-red-800 outline-none text-center font-bold"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[8px] text-gray-500">TAKE PROFIT (TP %)</label>
+                      <input 
+                        type="number" 
+                        step="0.1"
+                        value={orderTpPct}
+                        onChange={(e) => setOrderTpPct(e.target.value)}
+                        placeholder="Örn: 4.0"
+                        className="w-full bg-gray-955 border border-cyan-950 text-green-400 text-xs rounded px-2.5 py-1.5 focus:border-green-800 outline-none text-center font-bold"
+                      />
+                    </div>
+                  </div>
+                </div>
               </div>
-            )}
-        </div>
-      )}
+
+              {/* Harekete Geçiren Büyük Neon Aksiyon Butonu */}
+              <button 
+                onClick={handlePlaceManualOrder}
+                className={`w-full py-2.5 rounded font-bold uppercase text-xs tracking-widest transition-all cursor-pointer ${
+                  orderSide === 'LONG' 
+                    ? 'bg-green-950 border border-green-500 text-green-400 shadow-[0_0_15px_rgba(34,197,94,0.3)] hover:bg-green-900' 
+                    : 'bg-red-950 border border-red-500 text-red-400 shadow-[0_0_15px_rgba(239,68,68,0.3)] hover:bg-red-900'
+                }`}
+              >
+                {orderSide === 'LONG' ? '🚀 SPOT BUY EMİR GÖNDER' : '💥 SPOT SELL EMİR GÖNDER'}
+              </button>
+            </div>
+          </div>
+      </div>
+      {/* ════════════════ PİYASA SEKMESİ ════════════════ */}
+      {activeTab === 'market' && (() => {
+        const maxVol = Math.max(...mkFiltered.map(t => t.quoteVolume), 1);
+        return (
+          <div className="bg-gray-900 border border-cyan-900 rounded-lg p-4 space-y-3">
+
+            {/* Özet istatistikler */}
+            <div className="grid grid-cols-3 gap-2">
+              <div className="bg-gray-800 rounded-lg p-3 text-center">
+                <div className="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Toplam Parite</div>
+                <div className="text-xl font-bold text-cyan-300">{allTickers.length}</div>
+                <div className="text-[10px] text-gray-500">{quoteAsset} Spot</div>
+              </div>
+              <div className="bg-green-950 border border-green-900 rounded-lg p-3 text-center">
+                <div className="text-[10px] text-green-600 uppercase tracking-widest mb-1">Yükselen</div>
+                <div className="text-xl font-bold text-green-400">{gainersCount}</div>
+                <div className="text-[10px] text-green-700">{allTickers.length ? Math.round(gainersCount/allTickers.length*100) : 0}% coin</div>
+              </div>
+              <div className="bg-red-950 border border-red-900 rounded-lg p-3 text-center">
+                <div className="text-[10px] text-red-700 uppercase tracking-widest mb-1">Düşen</div>
+                <div className="text-xl font-bold text-red-400">{losersCount}</div>
+                <div className="text-[10px] text-red-800">{allTickers.length ? Math.round(losersCount/allTickers.length*100) : 0}% coin</div>
+              </div>
+            </div>
+
+            {/* Arama + Filtre */}
+            <div className="flex gap-2 flex-wrap items-center">
+              <div className="relative">
+                <Search size={12} className="absolute left-2.5 top-2 text-gray-500" />
+                <input
+                  type="text"
+                  placeholder="BTC, ETH, SOL..."
+                  value={mkSearch}
+                  onChange={e => { setMkSearch(e.target.value); setMkFilter('all'); }}
+                  className="bg-gray-800 border border-gray-700 text-cyan-300 text-xs rounded pl-7 pr-3 py-1.5 w-44 focus:border-cyan-600 outline-none"
+                />
+              </div>
+              {['all','gainers','losers','high_vol'].map(f => (
+                <button key={f} onClick={() => { setMkFilter(f); setMkSearch(''); }}
+                  className={`px-3 py-1.5 text-[11px] rounded border font-bold transition-colors cursor-pointer ${
+                    mkFilter===f && !mkSearch
+                      ? f==='gainers' ? 'bg-green-950 border-green-700 text-green-400 font-bold'
+                        : f==='losers' ? 'bg-red-950 border-red-800 text-red-400 font-bold'
+                        : f==='high_vol' ? 'bg-yellow-950 border-yellow-700 text-yellow-450 font-bold bg-yellow-950/20'
+                        : 'bg-cyan-950 border-cyan-700 text-cyan-300 font-bold'
+                      : 'border-gray-700 text-gray-500 hover:border-gray-600'
+                  }`}>
+                  {f==='all' ? 'Tümü' : f==='gainers' ? '▲ Yükselen' : f==='losers' ? '▼ Düşen' : `🔥 Hacimli (>1M ${quoteAsset})`}
+                </button>
+              ))}
+              <span className="ml-auto text-[10px] text-gray-600">{mkFiltered.length} sonuç · 3s güncelleme</span>
+            </div>
+
+            {/* Tablo */}
+            {allTickers.length === 0
+              ? <p className="text-xs text-gray-600 text-center py-10">Veriler yükleniyor…</p>
+              : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-gray-500 border-b border-gray-800 text-[10px] sticky top-0 bg-gray-900">
+                        <th className="text-left py-2 pr-2 w-6">#</th>
+                        <th className="text-left pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('symbol')}>
+                          PARİTE {mkSort.col==='symbol' ? (mkSort.dir===1 ? <ArrowUp size={9} className="inline"/> : <ArrowDown size={9} className="inline"/>) : null}
+                        </th>
+                        <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('lastPrice')}>
+                          FİYAT {mkSort.col==='lastPrice' ? (mkSort.dir===1 ? <ArrowUp size={9} className="inline"/> : <ArrowDown size={9} className="inline"/>) : null}
+                        </th>
+                        <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('priceChangePct')}>
+                          24s % {mkSort.col==='priceChangePct' ? (mkSort.dir===1 ? <ArrowUp size={9} className="inline"/> : <ArrowDown size={9} className="inline"/>) : null}
+                        </th>
+                        <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('highPrice')}>
+                          24s YÜKSEK
+                        </th>
+                        <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('lowPrice')}>
+                          24s DÜŞÜK
+                        </th>
+                        <th className="text-right pr-3 cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('quoteVolume')}>
+                          HACİM (M{quoteAsset === 'TRY' ? '₺' : '$'}) {mkSort.col==='quoteVolume' ? (mkSort.dir===1 ? <ArrowUp size={9} className="inline"/> : <ArrowDown size={9} className="inline"/>) : null}
+                        </th>
+                        <th className="text-right cursor-pointer hover:text-cyan-400 select-none" onClick={() => mkSortFn('count')}>
+                          İŞLEM
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {mkFiltered.slice(0, 300).map((t, i) => {
+                        const isPos = t.priceChangePct >= 0;
+                        const priceDec = t.lastPrice >= 1000 ? 2 : t.lastPrice >= 1 ? 4 : 6;
+                        const volPercent = (t.quoteVolume / maxVol) * 100;
+                        return (
+                          <tr key={t.symbol}
+                            className="border-b border-gray-800 hover:bg-gray-800 cursor-pointer"
+                            onClick={() => { setChartSymbol(t.symbol); setActiveTab('chart'); }}>
+                            <td className="py-1.5 pr-2 text-gray-600">{i+1}</td>
+                            <td className="pr-3 font-bold text-white">
+                              {t.symbol.replace(quoteAsset,'')}
+                              <span className="text-gray-600 font-normal">/{quoteAsset}</span>
+                            </td>
+                            <td className="text-right pr-3 font-mono text-cyan-200">{t.lastPrice.toFixed(priceDec)}</td>
+                            <td className={`text-right pr-3 font-bold ${isPos ? 'text-green-400' : 'text-red-400'}`}>
+                              <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] ${isPos ? 'bg-green-950' : 'bg-red-950'}`}>
+                                {isPos ? '+' : ''}{t.priceChangePct.toFixed(2)}%
+                              </span>
+                            </td>
+                            <td className="text-right pr-3 text-green-600 font-mono">{t.highPrice.toFixed(priceDec)}</td>
+                            <td className="text-right pr-3 text-red-700 font-mono">{t.lowPrice.toFixed(priceDec)}</td>
+                            
+                            {/* Bağıl Hacim Neon Barı */}
+                            <td className="text-right pr-3 font-bold text-yellow-500 relative min-w-[100px] font-mono">
+                              <div 
+                                className="absolute right-0 top-0 bottom-0 bg-yellow-500/10 border-r border-yellow-500/35"
+                                style={{ width: `${Math.min(volPercent, 100)}%`, pointerEvents: 'none' }}
+                              />
+                              <span className="relative z-10">{(t.quoteVolume/1e6).toFixed(1)}M</span>
+                            </td>
+                            
+                            <td className="text-right text-gray-500">{t.count >= 1000 ? (t.count/1000).toFixed(0)+'K' : t.count}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+          </div>
+        );
+      })()}
 
       {/* ════════════════ SİNYAL KARTLARI SEKMESİ ════════════════ */}
       {activeTab === 'scanner' && (
@@ -998,7 +1561,7 @@ export default function App() {
             : (
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
                 {recentSignals.map((sig, i) => (
-                  <SignalCard key={i} sig={sig} onSelect={handleSelectSignal} onExecute={handleForceExecute} />
+                  <SignalCard key={i} sig={sig} onSelect={handleSelectSignal} onExecute={handleForceExecute} onOpenDetails={setSelectedSignalForModal} />
                 ))}
               </div>
             )}
@@ -1044,6 +1607,149 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {editingProtectionPos && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-gray-900 border border-cyan-800 rounded-lg p-4 w-80 glass-panel font-mono text-xs space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-cyan-900 pb-2">
+              <span className="font-bold text-cyan-300 uppercase tracking-widest flex items-center gap-1.5">
+                <Shield size={14} className="text-cyan-500" />
+                {editingProtectionPos.symbol} KORUMA AYARI
+              </span>
+              <button onClick={() => setEditingProtectionPos(null)} className="text-gray-500 hover:text-white transition-colors cursor-pointer text-sm font-bold">✕</button>
+            </div>
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <label className="text-[10px] text-gray-500 uppercase tracking-wider">STOP LOSS (SL) FİYATI</label>
+                <input type="number" step="any" value={tempSlPrice} onChange={e => setTempSlPrice(e.target.value)} placeholder="Örn: 72400 (Boş ise iptal)" className="w-full bg-gray-800 border border-gray-700 text-cyan-200 text-xs rounded px-2.5 py-1.5 focus:border-cyan-600 outline-none font-mono" />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] text-gray-500 uppercase tracking-wider">TAKE PROFIT (TP) FİYATI</label>
+                <input type="number" step="any" value={tempTpPrice} onChange={e => setTempTpPrice(e.target.value)} placeholder="Örn: 76500 (Boş ise iptal)" className="w-full bg-gray-800 border border-gray-700 text-cyan-200 text-xs rounded px-2.5 py-1.5 focus:border-cyan-600 outline-none font-mono" />
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => setEditingProtectionPos(null)} className="flex-1 py-1.5 border border-gray-700 rounded hover:bg-gray-800 text-gray-400 font-bold transition-colors uppercase text-[10px] cursor-pointer">Vazgeç</button>
+              <button onClick={handleUpdateProtection} className="flex-1 py-1.5 bg-cyan-950 border border-cyan-500 text-cyan-300 rounded hover:bg-cyan-900 font-bold transition-colors uppercase text-[10px] cursor-pointer">Güncelle</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {selectedSignalForModal && (() => {
+        const sig = selectedSignalForModal;
+        const sl = sig.price * (1 - sig.stop_loss_pct / 100);
+        const tp = sig.price * (1 + sig.take_profit_pct / 100);
+        const totalDist = tp - sl;
+        const entryPercent = totalDist > 0 ? ((sig.price - sl) / totalDist) * 100 : 50;
+        const statusColor = { PENDING:'yellow', EXECUTED:'green', SKIPPED:'gray', EXPIRED:'red' }[sig.status] || 'gray';
+        const rsiPct = Math.min(Math.max(sig.rsi_value || 50, 0), 100);
+        const adxPct = Math.min(Math.max(sig.adx_value || 25, 0), 100);
+        
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm font-mono text-xs">
+            <div className="bg-gray-900 border border-cyan-800 rounded-lg p-5 w-[420px] glass-panel space-y-4 shadow-2xl text-cyan-300">
+              <div className="flex items-center justify-between border-b border-cyan-900 pb-2">
+                <span className="font-bold text-white uppercase tracking-widest text-sm flex items-center gap-1.5">
+                  🔔 SİNYAL DETAY ANALİZİ
+                </span>
+                <button onClick={() => setSelectedSignalForModal(null)} className="text-gray-500 hover:text-white transition-colors cursor-pointer text-sm font-bold">✕</button>
+              </div>
+              
+              {/* Card Info Header */}
+              <div className="flex justify-between items-start bg-gray-950/40 p-2.5 rounded border border-cyan-950/50">
+                <div>
+                  <div className="text-base font-bold text-white">{sig.symbol}</div>
+                  <div className="text-[10px] text-gray-500">{sig.matched_pattern || sig.star_label || 'OCC Sinyali'}</div>
+                </div>
+                <div className="text-right">
+                  <Badge label={sig.status} color={statusColor} />
+                  <div className="text-yellow-300 text-sm mt-0.5">{sig.stars || '⭐'}</div>
+                </div>
+              </div>
+
+              {/* RSI / ADX Gauges */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-gray-950/40 border border-cyan-950/40 p-2.5 rounded text-center space-y-2">
+                  <div className="text-[9px] text-gray-500 uppercase">RSI GÖSTERGESİ</div>
+                  <div className="relative flex justify-center items-center h-12 w-full">
+                    <div className="absolute w-24 h-12 border-t-8 border-l-8 border-r-8 border-cyan-950 rounded-t-full" />
+                    <div 
+                      className="absolute w-24 h-12 border-t-8 border-l-8 border-r-8 border-cyan-500 rounded-t-full origin-bottom transition-transform"
+                      style={{ transform: `rotate(${(rsiPct/100)*180 - 90}deg)` }}
+                    />
+                    <span className="absolute bottom-0 text-white font-bold text-sm">{fmt(sig.rsi_value,1)}</span>
+                  </div>
+                  <span className="text-[9px] text-gray-400 capitalize">{sig.rsi_quality} Bölgesi</span>
+                </div>
+
+                <div className="bg-gray-950/40 border border-cyan-950/40 p-2.5 rounded text-center space-y-2">
+                  <div className="text-[9px] text-gray-500 uppercase">TREND GÜCÜ (ADX)</div>
+                  <div className="relative flex justify-center items-center h-12 w-full">
+                    <div className="absolute w-24 h-12 border-t-8 border-l-8 border-r-8 border-cyan-950 rounded-t-full" />
+                    <div 
+                      className="absolute w-24 h-12 border-t-8 border-l-8 border-r-8 border-yellow-500 rounded-t-full origin-bottom transition-transform"
+                      style={{ transform: `rotate(${(adxPct/100)*180 - 90}deg)` }}
+                    />
+                    <span className="absolute bottom-0 text-white font-bold text-sm">{fmt(sig.adx_value,1)}</span>
+                  </div>
+                  <span className="text-[9px] text-gray-400 capitalize">{sig.adx_regime} Rejimi</span>
+                </div>
+              </div>
+
+              {/* Risk/Reward yatay visual bar */}
+              <div className="space-y-2 bg-gray-950/40 p-3 rounded border border-cyan-950/30">
+                <div className="text-[9px] text-gray-500 uppercase flex justify-between">
+                  <span>R:R ORANI (1:{(sig.take_profit_pct/sig.stop_loss_pct).toFixed(1)})</span>
+                  <span className="text-white font-bold">Risk/Reward Çizelgesi</span>
+                </div>
+                
+                {/* Progress line */}
+                <div className="relative h-2 w-full bg-gray-800 rounded-full my-4">
+                  {/* Stop loss label */}
+                  <span className="absolute -top-3 left-0 text-[8px] text-red-500 font-bold">SL ({fmt(sl)})</span>
+                  {/* Take profit label */}
+                  <span className="absolute -top-3 right-0 text-[8px] text-green-400 font-bold">TP ({fmt(tp)})</span>
+                  
+                  {/* Entry marker */}
+                  <div 
+                    className="absolute -top-1 w-4 h-4 bg-cyan-400 border-2 border-gray-900 rounded-full shadow-[0_0_6px_#22d3ee] flex items-center justify-center -ml-2"
+                    style={{ left: `${entryPercent}%` }}
+                    title={`Giriş: ${fmt(sig.price)}`}
+                  />
+                  <span 
+                    className="absolute -bottom-3 text-[8px] text-cyan-300 font-bold -ml-4"
+                    style={{ left: `${entryPercent}%` }}
+                  >
+                    Giriş ({fmt(sig.price)})
+                  </span>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex gap-2 pt-2 border-t border-cyan-950/30">
+                <button 
+                  onClick={() => {
+                    handleSelectSignal(sig.symbol);
+                    setSelectedSignalForModal(null);
+                  }}
+                  className="flex-1 py-2 bg-cyan-950 border border-cyan-500 text-cyan-300 rounded hover:bg-cyan-900 font-bold transition-all uppercase text-[10px] cursor-pointer inline-flex items-center justify-center gap-1"
+                >
+                  <Eye size={12} /> Grafikte Göster
+                </button>
+                <button 
+                  onClick={() => {
+                    setSelectedSignalForModal(null);
+                  }}
+                  className="py-2 px-4 border border-gray-700 text-gray-400 rounded hover:bg-gray-800 font-bold transition-all uppercase text-[10px] cursor-pointer"
+                >
+                  Kapat
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
     </div>
   );

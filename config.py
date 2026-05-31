@@ -20,28 +20,29 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# ==================== Binance Global Futures API ====================
+# ==================== Binance TR Spot API ====================
 BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
-BINANCE_BASE_URL   = "https://fapi.binance.com"  # USDT-M Perpetual Futures
+BINANCE_BASE_URL   = "https://www.binance.tr"  # Binance.TR Spot
 
 # ==================== TARAMA AYARLARI ====================
-SCAN_INTERVAL = 900      # Her 15 dakikada bir tara (tarama ~11dk sürüyor)
-KLINE_INTERVAL = "15m"   # Tetikleyici timeframe (15dk)
+SCAN_INTERVAL = 300      # Her 5 dakikada bir tara
+KLINE_INTERVAL = "5m"    # Tetikleyici timeframe (5dk)
+
 KLINE_LIMIT = 250
 
 # ==================== PARİTE AYARLARI ====================
+QUOTE_ASSET = os.getenv("QUOTE_ASSET", "TRY").upper()
 PAIR_MODE = "auto"  # "auto" veya "manual"
-ONLY_USDT = True    # Futures sadece USDT perpetual çiftlerini tarar
+ONLY_USDT = QUOTE_ASSET == "USDT"
 
 MANUAL_USDT_PAIRS = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
+    f"BTC{QUOTE_ASSET}", f"ETH{QUOTE_ASSET}", f"BNB{QUOTE_ASSET}", f"SOL{QUOTE_ASSET}", f"XRP{QUOTE_ASSET}",
+    f"DOGE{QUOTE_ASSET}", f"ADA{QUOTE_ASSET}", f"AVAX{QUOTE_ASSET}", f"DOT{QUOTE_ASSET}", f"LINK{QUOTE_ASSET}",
 ]
 
-# Minimum 24s işlem hacmi filtresi (USDT cinsinden)
-# Futures pazarında hacim yüksek olduğu için 1M USDT idealdir
-MIN_VOLUME_USDT = 1_000_000
+# Minimum 24s işlem hacmi filtresi (quoteAsset cinsinden)
+MIN_VOLUME_USDT = 0  # Devre dışı — tüm pariteler taranır
 
 # ==================== HİYERARŞİK OCC PUANLAMA ====================
 # Her timeframe'de OCC durumu (yeşil/kırmızı) kontrol edilir.
@@ -57,11 +58,11 @@ MIN_VOLUME_USDT = 1_000_000
 
 OCC_TIMEFRAMES = {
     # timeframe: (ağırlık, kline_limit, açıklama)
-    "1w":  (3, 52,  "Haftalık"),    # 3 puan — yön belirler
-    "1d":  (2, 100, "Günlük"),      # 2 puan — giriş penceresi
-    "4h":  (2, 200, "4 Saatlik"),   # 2 puan — zamanlama
-    "1h":  (1, 250, "1 Saatlik"),   # 1 puan — zamanlama
-    "15m": (0, 250, "15 Dakika"),   # 0 puan — sadece tetikleyici
+    "1d":  (3, 100, "Günlük"),      # 3 puan — yön belirler
+    "4h":  (2, 200, "4 Saatlik"),   # 2 puan — giriş penceresi
+    "1h":  (2, 250, "1 Saatlik"),   # 2 puan — zamanlama
+    "15m": (1, 250, "15 Dakika"),   # 1 puan — zamanlama
+    "5m":  (0, 250, "5 Dakika"),    # 0 puan — sadece tetikleyici
 }
 
 # Toplam maks puan: 3+2+2+1 = 8
@@ -90,7 +91,7 @@ SIGNAL_FILTER = {
         {
             "name": "Dip Avcısı",
             "description": "Derin düzeltme sonrası dönüş",
-            "pattern": {"1w": True, "1d": True, "4h": False, "1h": False, "15m": True},
+            "pattern": {"1d": True, "4h": True, "1h": False, "15m": False, "5m": True},
             "min_adx": 20,       # Düzeltmede ADX düşük olabilir
             "max_adx": 50,       # ADX > 50 ise hareket bitmiş olabilir
             "min_rsi": 35,       # Dip bölgesinde RSI düşük olur
@@ -98,21 +99,21 @@ SIGNAL_FILTER = {
         {
             "name": "Trend Takipçi",
             "description": "4H ve 1H da yeşil, trend devamı",
-            "pattern": {"1w": True, "1d": True, "4h": True, "1h": False, "15m": True},
+            "pattern": {"1d": True, "4h": True, "1h": True, "15m": False, "5m": True},
             "min_adx": 25,       # Güçlü trend gerekli
             "min_rsi": 50,       # Momentum devam etmeli
         },
         {
             "name": "Trend Takipçi v2",
             "description": "1H yeşil, 4H kırmızı ama üst TF'ler güçlü",
-            "pattern": {"1w": True, "1d": True, "4h": False, "1h": True, "15m": True},
+            "pattern": {"1d": True, "4h": True, "1h": False, "15m": True, "5m": True},
             "min_adx": 22,
             "min_rsi": 42,
         },
         {
             "name": "Güçlü Momentum",
             "description": "4H ve 1H ikisi de yeşil, güçlü yükseliş",
-            "pattern": {"1w": True, "1d": True, "4h": True, "1h": True, "15m": True},
+            "pattern": {"1d": True, "4h": True, "1h": True, "15m": True, "5m": True},
             "min_adx": 22,
             "min_rsi": 45,
         },
@@ -129,7 +130,7 @@ SIGNAL_FILTER = {
     "score_fallback": {
         "enabled": True,
         "min_score": 6,
-        "require_upper_tf": True,   # 1w veya 1d'den biri yeşil olmalı
+        "require_upper_tf": True,   # 1d veya 4h'den biri yeşil olmalı
         "min_adx": 22,
         "min_rsi": 45,
     },
@@ -139,11 +140,11 @@ SIGNAL_FILTER = {
     "star_rating": {
         "enabled": True,
         "tiers": [
-            # (min_score, yıldız, etiket, pozisyon_önerisi)
-            {"min_score": 8, "stars": "⭐⭐⭐", "label": "Full Sniper",    "position_pct": 100},
-            {"min_score": 7, "stars": "⭐⭐⭐", "label": "Full Sniper",    "position_pct": 100},
-            {"min_score": 6, "stars": "⭐⭐",   "label": "Güçlü Sinyal",   "position_pct": 75},
-            {"min_score": 5, "stars": "⭐",     "label": "Fırsat",         "position_pct": 50},
+            # (min_score, yıldız, etiket, pozisyon_önerisi) — kullanılabilir bakiyenin %'si
+            {"min_score": 8, "stars": "⭐⭐⭐", "label": "Full Sniper",    "position_pct": 24},
+            {"min_score": 7, "stars": "⭐⭐⭐", "label": "Full Sniper",    "position_pct": 24},
+            {"min_score": 6, "stars": "⭐⭐",   "label": "Güçlü Sinyal",   "position_pct": 35},
+            {"min_score": 5, "stars": "⭐",     "label": "Fırsat",         "position_pct": 44},
         ],
     },
 }
@@ -203,6 +204,13 @@ SEND_CHART_IMAGE = True
 DAILY_SUMMARY_HOUR = 21
 NOTIFY_ALL_TF_CHANGES = False  # Kapalı: yüzlerce renk değişimi spam yapıyordu
 
+# ==================== HACİM (VOLUME) FİLTRESİ ====================
+VOLUME_FILTER = {
+    "enabled": False,            # Devre dışı — hacim filtresi kaldırıldı
+    "lookback_bars": 20,
+    "multiplier": 1.0,
+}
+
 # ==================== HACİM SPIKE ALGILAMA ====================
 VOLUME_SPIKE = {
     "enabled": False,           # Aktif etmek için True yapın
@@ -212,10 +220,21 @@ VOLUME_SPIKE = {
     "cooldown_minutes": 60,     # Aynı sembol için spike cooldown süresi
 }
 
-# Sinyal üretilmemesi gereken stablecoin ve benzeri çiftler (Futures)
+# Sinyal üretilmemesi gereken stablecoin ve benzeri çiftler (Spot)
+STABLECOIN_BASES = {
+    "USDT", "USDC", "FDUSD", "TUSD", "BUSD", "DAI", 
+    "USDP", "EUR", "GBP", "TRY", "USDE", "PYUSD", 
+    "AEUR", "USTC", "PAXG", "USD"
+}
+
 STABLECOIN_BLACKLIST = {
+    # USDT-based
     "USDCUSDT", "TUSDUSDT", "DAIUSDT", "BUSDUSDT",
-    "USDPUSDT", "EURUSDT", "GBPUSDT",
+    "USDPUSDT", "EURUSDT", "GBPUSDT", "FDUSDUSDT",
+    "USDEUSDT", "USDSUSDT", "PYUSDUSDT", "AEURUSDT",
+    # TRY-based
+    "USDTTRY", "USDCTRY", "BUSDTRY", "FDUSDTRY", 
+    "EURTRY", "GBPTRY", "USDTRY", "AEURTRY"
 }
 
 # ==================== LOGLAMA ====================
@@ -262,7 +281,7 @@ def validate_config():
                  f"Maks puan: {total_weight}, Eşik: {OCC_MIN_SCORE}")
     _logger.info(f"RSI filtre: {'Aktif' if RSI_CONFIG['enabled'] else 'Kapalı'}, "
                  f"ADX filtre: {'Aktif' if ADX_CONFIG['enabled'] else 'Kapalı'}")
-    _logger.info(f"Pariteler: Binance Futures USDT-M Perpetual | Min hacim: {MIN_VOLUME_USDT:,} USDT")
+    _logger.info(f"Pariteler: Binance.TR Spot {QUOTE_ASSET} | Min hacim: {MIN_VOLUME_USDT:,} {QUOTE_ASSET}")
 
     if not TELEGRAM_BOT_TOKEN:
         _logger.warning("TELEGRAM_BOT_TOKEN ayarlanmamış!")

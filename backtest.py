@@ -26,8 +26,9 @@ import pandas as pd
 
 from config import (
     OCC_TIMEFRAMES, OCC_MIN_SCORE, OCC_PERIOD, OCC_MA_TYPE,
-    RSI_CONFIG, ADX_CONFIG, DYNAMIC_STOP_LOSS, ONLY_TRY,
+    RSI_CONFIG, ADX_CONFIG, DYNAMIC_STOP_LOSS, QUOTE_ASSET,
 )
+ONLY_TRY = QUOTE_ASSET == "TRY"
 from market_data import MarketData
 from analyzer import MultiTfOccAnalyzer, _calc_ma, _safe_float
 
@@ -175,13 +176,21 @@ class MultiTfBacktestEngine:
     """
 
     TF_MINUTES = {
-        "15m": 15, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080,
+        "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080,
     }
 
-    def __init__(self, min_score: int = None, max_hold_bars: int = 672):
+    def __init__(self, min_score: int = None, max_hold_bars: int = None):
         self.min_score = min_score or OCC_MIN_SCORE
-        # 672 = 7 gün × 24 saat × (60/15) = 672 bar (15dk TF)
-        self.max_hold_bars = max_hold_bars
+        
+        # Dynamically compute max hold bars for 7 days based on trigger timeframe
+        trigger_tf = next((tf for tf, (w, _, _) in OCC_TIMEFRAMES.items() if w == 0), "5m")
+        tf_mins = self.TF_MINUTES.get(trigger_tf, 5)
+        if max_hold_bars is None:
+            # 7 days * 24h * 60m / tf_mins
+            self.max_hold_bars = int(7 * 24 * 60 / tf_mins)
+        else:
+            self.max_hold_bars = max_hold_bars
+            
         self.market = MarketData()
 
     def run(self, symbols: list, label: str = "Backtest",
@@ -199,6 +208,9 @@ class MultiTfBacktestEngine:
 
     def _backtest_symbol(self, symbol: str, lookback_bars: int) -> tuple:
         """Tek sembol için multi-TF backtest."""
+        trigger_tf = next((tf for tf, (w, _, _) in OCC_TIMEFRAMES.items() if w == 0), "5m")
+        tf_mins = self.TF_MINUTES.get(trigger_tf, 5)
+
         # Tüm TF verilerini çek
         tf_dfs = {}
         for tf, (weight, limit, label) in OCC_TIMEFRAMES.items():
@@ -207,10 +219,10 @@ class MultiTfBacktestEngine:
                 tf_dfs[tf] = df
             time.sleep(0.3)
 
-        # 15dk verisi zorunlu (iterate edeceğimiz ana TF)
-        df_15m = tf_dfs.get("15m")
-        if df_15m is None or len(df_15m) < 100:
-            logger.warning(f"{symbol}: 15dk verisi yetersiz")
+        # Tetikleyici verisi zorunlu (iterate edeceğimiz ana TF)
+        df_trigger = tf_dfs.get(trigger_tf)
+        if df_trigger is None or len(df_trigger) < 100:
+            logger.warning(f"{symbol}: {trigger_tf} verisi yetersiz")
             return [], 0
 
         trades = []
@@ -218,9 +230,9 @@ class MultiTfBacktestEngine:
         min_warmup = 50
         prev_occ_states = {}  # {tf: is_green}
 
-        for bar_idx in range(min_warmup, len(df_15m)):
-            current_bar = df_15m.iloc[bar_idx]
-            current_time = df_15m.index[bar_idx]
+        for bar_idx in range(min_warmup, len(df_trigger)):
+            current_bar = df_trigger.iloc[bar_idx]
+            current_time = df_trigger.index[bar_idx]
             current_close = float(current_bar["close"])
             current_high = float(current_bar["high"])
             current_low = float(current_bar["low"])
@@ -235,17 +247,17 @@ class MultiTfBacktestEngine:
             for tf, (weight, _, label) in OCC_TIMEFRAMES.items():
                 df_tf = tf_dfs.get(tf)
                 if df_tf is None:
-                    if tf != "15m":
+                    if tf != trigger_tf:
                         max_score += weight
                     continue
 
                 # Look-ahead koruması: sadece current_time'a kadar olan veriyi kullan
-                if tf == "15m":
-                    window = df_15m.iloc[:bar_idx + 1]
+                if tf == trigger_tf:
+                    window = df_trigger.iloc[:bar_idx + 1]
                 else:
                     window = df_tf[df_tf.index <= current_time]
                     if len(window) < 20:
-                        if tf != "15m":
+                        if tf != trigger_tf:
                             max_score += weight
                         continue
 
@@ -257,7 +269,7 @@ class MultiTfBacktestEngine:
                 o_now = _safe_float(open_ma, -2)
 
                 if math.isnan(c_now) or math.isnan(o_now):
-                    if tf != "15m":
+                    if tf != trigger_tf:
                         max_score += weight
                     continue
 
@@ -266,7 +278,7 @@ class MultiTfBacktestEngine:
                 just_crossed = prev_green is not None and prev_green != is_green
                 prev_occ_states[tf] = is_green
 
-                if tf == "15m":
+                if tf == trigger_tf:
                     trigger_crossed = just_crossed and is_green
                 else:
                     max_score += weight
@@ -287,7 +299,7 @@ class MultiTfBacktestEngine:
                     active_trade.exit_time = current_time
                     active_trade.exit_reason = f"Stop-Loss ({sl_pct:.1f}%)"
                     active_trade.pnl_pct = -sl_pct
-                    active_trade.duration_hours = bars_held * 15 / 60
+                    active_trade.duration_hours = bars_held * tf_mins / 60
                     trades.append(active_trade)
                     active_trade = None
                     continue
@@ -304,7 +316,7 @@ class MultiTfBacktestEngine:
 
                     if active_trade._trailing_active and bar_idx >= 14:
                         atr_mult = trail_cfg.get("atr_multiplier", 2.5)
-                        recent = df_15m.iloc[bar_idx - 14:bar_idx + 1]
+                        recent = df_trigger.iloc[bar_idx - 14:bar_idx + 1]
                         tr_vals = pd.concat([
                             recent["high"] - recent["low"],
                             (recent["high"] - recent["close"].shift(1)).abs(),
@@ -319,7 +331,7 @@ class MultiTfBacktestEngine:
                             active_trade.exit_time = current_time
                             active_trade.exit_reason = f"Trailing Stop ({atr_mult}x ATR)"
                             active_trade.pnl_pct = pnl
-                            active_trade.duration_hours = bars_held * 15 / 60
+                            active_trade.duration_hours = bars_held * tf_mins / 60
                             trades.append(active_trade)
                             active_trade = None
                             continue
@@ -332,7 +344,7 @@ class MultiTfBacktestEngine:
                     active_trade.exit_time = current_time
                     active_trade.exit_reason = f"Take-Profit ({tp_pct:.1f}%)"
                     active_trade.pnl_pct = tp_pct
-                    active_trade.duration_hours = bars_held * 15 / 60
+                    active_trade.duration_hours = bars_held * tf_mins / 60
                     trades.append(active_trade)
                     active_trade = None
                     continue
@@ -342,9 +354,9 @@ class MultiTfBacktestEngine:
                     pnl = ((current_close - entry_price) / entry_price) * 100
                     active_trade.exit_price = current_close
                     active_trade.exit_time = current_time
-                    active_trade.exit_reason = f"Timeout ({bars_held * 15 // 60}h)"
+                    active_trade.exit_reason = f"Timeout ({bars_held * tf_mins // 60}h)"
                     active_trade.pnl_pct = pnl
-                    active_trade.duration_hours = bars_held * 15 / 60
+                    active_trade.duration_hours = bars_held * tf_mins / 60
                     trades.append(active_trade)
                     active_trade = None
                     continue
@@ -356,7 +368,7 @@ class MultiTfBacktestEngine:
                 # RSI filtresi
                 rsi_val = float("nan")
                 if RSI_CONFIG.get("enabled") and bar_idx >= 20:
-                    close_series = df_15m["close"].iloc[:bar_idx + 1]
+                    close_series = df_trigger["close"].iloc[:bar_idx + 1]
                     delta = close_series.diff()
                     gain = delta.where(delta > 0, 0.0).rolling(14).mean()
                     loss_s = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
@@ -425,17 +437,17 @@ class MultiTfBacktestEngine:
 
         # Açık kalan pozisyonu kapat
         if active_trade is not None:
-            last_bar = df_15m.iloc[-1]
-            bars_held = len(df_15m) - 1 - active_trade._entry_bar_idx
+            last_bar = df_trigger.iloc[-1]
+            bars_held = len(df_trigger) - 1 - active_trade._entry_bar_idx
             pnl = ((float(last_bar["close"]) - active_trade.entry_price) / active_trade.entry_price) * 100
             active_trade.exit_price = float(last_bar["close"])
-            active_trade.exit_time = df_15m.index[-1]
+            active_trade.exit_time = df_trigger.index[-1]
             active_trade.exit_reason = "Backtest Sonu"
             active_trade.pnl_pct = pnl
-            active_trade.duration_hours = bars_held * 15 / 60
+            active_trade.duration_hours = bars_held * tf_mins / 60
             trades.append(active_trade)
 
-        bars_scanned = len(df_15m) - min_warmup
+        bars_scanned = len(df_trigger) - min_warmup
         logger.info(f"{symbol}: {len(trades)} işlem, {bars_scanned} bar tarandı")
 
         time.sleep(0.5)
@@ -487,8 +499,9 @@ def main():
         symbols = get_symbols(market, max_symbols=args.symbols)
         print(f"  Semboller  : {len(symbols)}")
 
+    trigger_tf = next((tf for tf, (w, _, _) in OCC_TIMEFRAMES.items() if w == 0), "5m")
     print(f"  Lookback   : {args.bars} bar")
-    print(f"  Iterate    : 15dk bar'ları")
+    print(f"  Iterate    : {trigger_tf} bar'ları")
     print(f"{'═' * 70}")
 
     if not symbols:

@@ -1,10 +1,11 @@
 # ============================================================================
-# order_worker.py - Binance Futures Long Pozisyon İşlem Motoru
+# order_worker.py - Binance.TR Spot Alım/Satım Pozisyon İşlem Motoru
 # ============================================================================
-# scanner.py'nin MongoDB'ye yazdığı PENDING sinyalleri okur, LONG pozisyon açar,
-# SL/TP takibini yapar ve pozisyonu kapatır.
+# scanner.py'nin MongoDB'ye yazdığı PENDING sinyalleri okur, Spot alım yapar,
+# SL/TP takibini yapar ve spot satış ile pozisyonu kapatır.
 # ============================================================================
 
+import os
 import logging
 import sys
 import time
@@ -13,6 +14,7 @@ from datetime import datetime
 from pymongo import MongoClient
 
 from market_data import MarketData
+from config import QUOTE_ASSET
 
 # ==================== LOGLAMA ====================
 logging.basicConfig(
@@ -30,11 +32,11 @@ TRADE_CONFIG = {
     # True → gerçek emir gönderir | False → simülasyon (kuru çalışma)
     "enabled": True,
 
-    # Her işlem için maksimum USDT bütçesi
-    "max_budget_per_trade_usdt": 50.0,
+    # Her işlem için maksimum bütçe (Quote asset cinsinden)
+    "max_budget_per_trade": float(os.getenv("MAX_BUDGET_PER_TRADE", "500" if QUOTE_ASSET == "TRY" else "50")),
 
-    # Kaldıraç (Binance Futures arayüzünden önceden ayarlanmış olmalı)
-    "leverage": 5,
+    # Kaldıraç (Spot trading için 1 olmalıdır)
+    "leverage": 1,
 
     # Minimum kontrat miktarı (sembol bazlı stepSize'a göre değişebilir)
     "min_quantity": 0.001,
@@ -89,15 +91,19 @@ class OrderWorker:
             logger.info(f"İşleniyor: {symbol}")
 
             # ── Bakiye kontrolü ──
-            available = self.market.get_available_balance("USDT")
-            budget    = TRADE_CONFIG["max_budget_per_trade_usdt"]
-            position_pct = sig.get("position_size_pct", 100) / 100.0
-            allocated = budget * position_pct
+            available = self.market.get_available_balance(QUOTE_ASSET)
+            # position_size_pct: yıldız sistemine göre kullanılabilir bakiyenin %'si
+            # 3 yıldız → %24, 2 yıldız → %35, 1 yıldız → %44
+            position_pct = sig.get("position_size_pct", 0.44)
+            if position_pct > 1:
+                position_pct = position_pct / 100.0  # eski format uyumluluğu
+            # Yüzde kullanılabilir bakiyeden hesapla
+            allocated = available * position_pct
 
             if available < allocated:
                 logger.warning(
                     f"{symbol}: Yetersiz bakiye. "
-                    f"Gerekli: {allocated:.2f} USDT, Mevcut: {available:.2f} USDT"
+                    f"Gerekli: {allocated:.2f} {QUOTE_ASSET}, Mevcut: {available:.2f} {QUOTE_ASSET}"
                 )
                 self._mark_signal(sig["_id"], "SKIPPED", "Yetersiz bakiye")
                 continue
@@ -116,26 +122,48 @@ class OrderWorker:
 
             logger.info(
                 f"{symbol} | Fiyat: {current_price} | "
-                f"Bütçe: {allocated:.2f} USDT | Miktar: {quantity}"
+                f"Bütçe: {allocated:.2f} {QUOTE_ASSET} | Miktar: {quantity}"
             )
 
-            # ── Emir gönder (LONG açma: BUY LONG MARKET) ──
+            # ── Emir gönder (Spot alım: BUY MARKET) ──
             if TRADE_CONFIG["enabled"]:
-                order = self.market.create_futures_order(
+                order_resp = self.market.create_futures_order(
                     symbol, "BUY", "LONG", "MARKET", quantity
                 )
-                if not order or "orderId" not in order:
-                    logger.error(f"❌ {symbol} Futures Long emri başarısız!")
-                    self._mark_signal(sig["_id"], "SKIPPED", "Emir başarısız")
+                
+                # Binance.TR yanıtı: {"code":0, "msg":"Success", "data":{"orderId":..., "executedPrice":..., "executedQty":...}}
+                logger.info(f"📦 {symbol} API Yanıtı: {order_resp}")
+                
+                if not order_resp:
+                    logger.error(f"❌ {symbol} Spot alım emri başarısız! (API yanıtı None)")
+                    self._mark_signal(sig["_id"], "SKIPPED", "Emir başarısız - API yanıtsız")
                     continue
+                
+                # API hata kontrolü
+                resp_code = order_resp.get("code", -1)
+                if resp_code != 0:
+                    logger.error(f"❌ {symbol} Spot alım emri başarısız! Hata: {order_resp.get('msg', 'Bilinmeyen')}")
+                    self._mark_signal(sig["_id"], "SKIPPED", f"API Hata: {order_resp.get('msg', '')}")
+                    continue
+                
+                # Yanıt verisini çıkar
+                order = order_resp.get("data", order_resp)
+                
+                if not order or "orderId" not in order:
+                    logger.error(f"❌ {symbol} Spot alım yanıtında orderId bulunamadı! Data: {order}")
+                    self._mark_signal(sig["_id"], "SKIPPED", "orderId bulunamadı")
+                    continue
+                
                 order_id = order["orderId"]
-                fill_price = float(order.get("avgPrice") or current_price)
-                logger.info(f"✅ {symbol} Long açıldı. OrderId: {order_id}")
+                fill_price = float(order.get("executedPrice") or order.get("avgPrice") or order.get("price") or current_price)
+                if fill_price == 0:
+                    fill_price = current_price
+                logger.info(f"✅ {symbol} Spot alındı. OrderId: {order_id} | Dolum Fiyatı: {fill_price}")
             else:
                 # Simülasyon modu
                 order_id = -1
                 fill_price = current_price
-                logger.info(f"[SIM] {symbol} Long açıldı (simülasyon). Fiyat: {fill_price}")
+                logger.info(f"[SIM] {symbol} Spot alındı (simülasyon). Fiyat: {fill_price}")
 
             # ── Pozisyonu MongoDB'ye kaydet ──
             sl_pct = sig.get("stop_loss_pct",  3.0)
@@ -194,20 +222,30 @@ class OrderWorker:
                 logger.debug(f"{symbol} | {current_price:.6f} | PnL: {pnl:+.2f}%")
                 continue
 
-            # ── Pozisyonu kapat (LONG kapatma: SELL LONG MARKET) ──
+            # ── Pozisyonu kapat (Spot satış: SELL MARKET) ──
             logger.info(f"🚪 {symbol} kapatılıyor. Neden: {close_reason}")
             if TRADE_CONFIG["enabled"]:
-                result = self.market.create_futures_order(
+                sell_resp = self.market.create_futures_order(
                     symbol, "SELL", "LONG", "MARKET", pos["quantity"]
                 )
-                if not result or "orderId" not in result:
-                    logger.error(f"❌ {symbol} pozisyonu kapatılamadı!")
+                logger.info(f"📦 {symbol} Satış API Yanıtı: {sell_resp}")
+                
+                if not sell_resp or sell_resp.get("code", -1) != 0:
+                    logger.error(f"❌ {symbol} spot pozisyonu satılamadı! Yanıt: {sell_resp}")
                     continue
-                exit_price = float(result.get("avgPrice") or current_price)
-                logger.info(f"✅ {symbol} Long kapatıldı. OrderId: {result['orderId']}")
+                
+                result = sell_resp.get("data", sell_resp)
+                if not result or "orderId" not in result:
+                    logger.error(f"❌ {symbol} satış yanıtında orderId bulunamadı! Data: {result}")
+                    continue
+                
+                exit_price = float(result.get("executedPrice") or result.get("avgPrice") or result.get("price") or current_price)
+                if exit_price == 0:
+                    exit_price = current_price
+                logger.info(f"✅ {symbol} Spot satıldı. OrderId: {result['orderId']} | Fiyat: {exit_price}")
             else:
                 exit_price = current_price
-                logger.info(f"[SIM] {symbol} Long kapatıldı (simülasyon). Fiyat: {exit_price}")
+                logger.info(f"[SIM] {symbol} Spot satıldı (simülasyon). Fiyat: {exit_price}")
 
             pnl_pct = ((exit_price - pos["entry_price"]) / pos["entry_price"]) * 100
             self.positions_col.update_one(
@@ -237,7 +275,7 @@ class OrderWorker:
             f"OrderWorker başlatıldı. "
             f"Mod: {'CANLI' if TRADE_CONFIG['enabled'] else 'SİMÜLASYON'} | "
             f"Kaldıraç: {TRADE_CONFIG['leverage']}x | "
-            f"Bütçe/İşlem: {TRADE_CONFIG['max_budget_per_trade_usdt']} USDT"
+            f"Bütçe/İşlem: {TRADE_CONFIG['max_budget_per_trade']} {QUOTE_ASSET}"
         )
 
         tick = 0

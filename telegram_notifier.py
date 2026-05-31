@@ -84,11 +84,9 @@ class TelegramNotifier:
         if tf_status.is_green:
             emoji = "🟢"
             direction = "YEŞİL (Yükseliş)"
-            action = "Close MA > Open MA"
         else:
             emoji = "🔴"
             direction = "KIRMIZI (Düşüş)"
-            action = "Close MA < Open MA"
 
         message = (
             f"{emoji} <b>OCC Renk Değişimi</b>\n"
@@ -110,99 +108,81 @@ class TelegramNotifier:
     def send_multi_tf_signal(self, signal, chart_bytes: Optional[bytes] = None) -> bool:
         """
         Hiyerarşik multi-TF OCC alım sinyalini gönderir.
-        TF heatmap + RSI/ADX bilgisi + SL/TP seviyeleri.
+        Gelişmiş premium çıktı şablonu.
         """
+        import math
         quote = "TRY" if signal.symbol.endswith("TRY") else "USDT"
         base = signal.symbol.replace("TRY", "").replace("USDT", "")
 
-        # TF Heatmap
-        heatmap_lines = []
-        for ts in signal.tf_statuses:
-            icon = "🟢" if ts.is_green else "🔴"
-            cross_mark = " ←" if ts.just_crossed else ""
-            pts = f"[{ts.weight}p]" if ts.weight > 0 else "[tetik]"
-            heatmap_lines.append(
-                f"  {icon} <b>{ts.label}</b> ({ts.timeframe}) "
-                f"{pts}{cross_mark}"
-            )
-        heatmap_text = "\n".join(heatmap_lines)
-
-        # Puan seviyesi — yıldız bazlı kalite sistemi
-        score = signal.total_score
-        max_score = signal.max_score
+        # Puan ve yıldız
         rating = signal.signal_star_rating
         stars = rating["stars"]
         score_label = rating["label"]
 
-        # Sinyal başlığı için emoji
-        star_count = stars.count("⭐")
-        if star_count >= 3:
-            score_emoji = "🔥🔥🔥"
-        elif star_count >= 2:
-            score_emoji = "🔥🔥"
-        else:
-            score_emoji = "🔥"
+        # Trend puanı detayı (örn: 1d: Yeşil, 4h: Kırmızı, 1h: Yeşil, 15m: Yeşil)
+        tf_details = []
+        for ts in signal.tf_statuses:
+            if ts.weight > 0:  # Sadece puanı olan üst TF'ler
+                status_str = "Yeşil" if ts.is_green else "Kırmızı"
+                tf_details.append(f"{ts.timeframe}: {status_str}")
+        tf_details_str = ", ".join(tf_details)
 
-        # Eşleşen desen adı
-        matched_pattern = getattr(signal, 'matched_pattern_name', '') or ""
+        # Tetikleyici timeframe bilgisi
+        trigger_tf_label = signal.trigger_tf
+        trigger_tf_desc = f"{trigger_tf_label} Grafik Kapanışı ile Yeni Yeşil Kesişim (Onaylandı)"
+
+        # Mum formasyonu (Ekstra Onay)
+        extra_onay = signal.candlestick_pattern or "Belirgin Desen Yok"
+
+        # ADX bilgisi ve trend modu
+        adx_val = signal.adx_value
+        if not math.isnan(adx_val):
+            if signal.adx_regime == "trending":
+                adx_desc = f"{adx_val:.1f} (Güçlü Trend - Geniş TP/SL Modu Aktif)"
+            elif signal.adx_regime == "weak":
+                adx_desc = f"{adx_val:.1f} (Zayıf Trend - Dar TP/SL Modu Aktif)"
+            else:
+                adx_desc = f"{adx_val:.1f} (Orta Trend - Standart TP/SL Modu Aktif)"
+        else:
+            adx_desc = "N/A"
 
         # RSI bilgisi
         rsi_val = signal.rsi_value
-        if signal.rsi_quality == "ideal":
-            rsi_text = f"RSI {rsi_val:.1f} — Ideal giriş bölgesi"
-            rsi_emoji = "✅"
-        elif signal.rsi_quality == "caution":
-            rsi_text = f"RSI {rsi_val:.1f} — DİKKAT: Hareket zaten olmuş olabilir"
-            rsi_emoji = "⚠️"
-        elif signal.rsi_quality == "blocked":
-            rsi_text = f"RSI {rsi_val:.1f} — Aşırı alım bölgesi"
-            rsi_emoji = "🚫"
+        if not math.isnan(rsi_val):
+            if signal.rsi_quality == "ideal":
+                rsi_desc = f"{rsi_val:.1f} (Aşırı Şişme Yok, Alan Güvenli)"
+            elif signal.rsi_quality == "caution":
+                rsi_desc = f"{rsi_val:.1f} (Kısmi Şişme, Dikkat)"
+            elif signal.rsi_quality == "blocked":
+                rsi_desc = f"{rsi_val:.1f} (Aşırı Şişmiş, Riskli)"
+            else:
+                rsi_desc = f"{rsi_val:.1f} (Stabil)"
         else:
-            rsi_text = f"RSI {rsi_val:.1f}" if rsi_val == rsi_val else "RSI N/A"
-            rsi_emoji = "📊"
+            rsi_desc = "N/A"
 
-        # ADX bilgisi
-        adx_val = signal.adx_value
-        if signal.adx_regime == "trending":
-            adx_text = f"ADX {adx_val:.1f} — Güçlü trend"
-            adx_emoji = "📈"
-        elif signal.adx_regime == "weak":
-            adx_text = f"ADX {adx_val:.1f} — Zayıf/yatay piyasa"
-            adx_emoji = "📉"
-        else:
-            adx_text = f"ADX {adx_val:.1f}" if adx_val == adx_val else "ADX N/A"
-            adx_emoji = "📊"
-
-        # SL/TP seviyeleri
+        # SL/TP fiyatları
         price = signal.price
         sl_pct = signal.stop_loss_pct
         tp_pct = signal.take_profit_pct
         sl_price = price * (1 - sl_pct / 100)
         tp_price = price * (1 + tp_pct / 100)
 
-        # Desen bilgisi satırı
-        pattern_line = ""
-        if matched_pattern:
-            pattern_line = f"🏷 <b>Strateji:</b> {matched_pattern}\n"
+        # Dinamik SL & TP açıklama satırı
+        dynamic_sl_tp = f"{sl_price:,.4f} (-%{sl_pct:.1f}) // Dinamik TP: {tp_price:,.4f} (+%{tp_pct:.1f})"
 
         message = (
-            f"{score_emoji} <b>ALIM SİNYALİ — {base}/{quote}</b>\n"
+            f"🟢 <b>[AL SİNYALİ] - {base}/{quote} // {score_label} {stars}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"\n"
-            f"🎯 <b>Giriş:</b> {price:,.4f} {quote}\n"
-            f"🛑 <b>Stop-Loss:</b> {sl_price:,.4f} (-%{sl_pct:.1f})\n"
-            f"💰 <b>Hedef:</b> {tp_price:,.4f} (+%{tp_pct:.1f})\n"
-            f"📊 <b>R:R:</b> 1:{tp_pct/sl_pct:.1f}\n"
-            f"\n"
-            f"<b>OCC Heatmap:</b> {score}/{max_score}p — {stars} {score_label}\n"
-            f"{heatmap_text}\n"
-            f"\n"
-            f"{pattern_line}"
-            f"{rsi_emoji} {rsi_text}\n"
-            f"{adx_emoji} {adx_text}\n"
-            f"💼 Pozisyon: %{signal.position_size_pct*100:.0f} ({signal.position_tier})\n"
-            f"\n"
+            f"<b>Strateji:</b> Multi-Timeframe OCC (Hiyerarşik Onaylı)\n"
+            f"<b>Trend Puanı:</b> {signal.total_score}/{signal.max_score} ({tf_details_str})\n"
+            f"<b>Tetikleyici:</b> {trigger_tf_desc}\n"
+            f"<b>Ekstra Onay:</b> {extra_onay}\n"
+            f"<b>Piyasa Durumu (ADX):</b> {adx_desc}\n"
+            f"<b>RSI Durumu:</b> {rsi_desc}\n"
+            f"<b>Giriş Fiyatı:</b> {price:,.4f} {quote}\n"
+            f"<b>Dinamik SL:</b> {dynamic_sl_tp}\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💼 <b>Öneri:</b> %{signal.position_size_pct*100:.0f} ({signal.position_tier})\n"
             f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"🔗 <a href='https://www.tradingview.com/chart/?symbol=BINANCE:{signal.symbol}'>TradingView</a>"
         )
@@ -270,6 +250,7 @@ class TelegramNotifier:
 
     def send_startup(self, pair_count: int) -> bool:
         tf_list = ", ".join(f"{tf}({w}p)" for tf, (w, _, _) in OCC_TIMEFRAMES.items())
+        trigger_tf = next((tf for tf, (w, _, _) in OCC_TIMEFRAMES.items() if w == 0), "5m")
 
         message = (
             f"🎯 <b>Multi-TF OCC Scanner Aktif!</b>\n"
@@ -281,7 +262,7 @@ class TelegramNotifier:
             f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"\n"
             f"Her OCC renk değişiminde bildirim gönderilecek.\n"
-            f"Puan ≥{OCC_MIN_SCORE} + 15dk tetikleyici → ALIM sinyali."
+            f"Puan ≥{OCC_MIN_SCORE} + {trigger_tf} tetikleyici → ALIM sinyali."
         )
         return self.send_message(message)
 

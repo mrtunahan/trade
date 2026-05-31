@@ -150,7 +150,7 @@ class Scanner:
 
     # Cache süreleri (saniye): üst TF'ler daha uzun cache
     CACHE_TTL = {
-        "1w": 3600, "1d": 1800, "4h": 600, "1h": 300, "15m": 60,
+        "1d": 1800, "4h": 600, "1h": 300, "15m": 60, "5m": 30,
     }
 
     def _get_tf_data(self, symbol: str) -> dict:
@@ -199,9 +199,10 @@ class Scanner:
         if not VOLUME_SPIKE.get("enabled", False):
             return False
 
-        df_15m = tf_data.get("15m")
+        trigger_tf = next((tf for tf, (w, _, _) in OCC_TIMEFRAMES.items() if w == 0), "5m")
+        df_trigger = tf_data.get(trigger_tf)
         lookback = VOLUME_SPIKE.get("lookback_bars", 20)
-        if df_15m is None or len(df_15m) < lookback + 1:
+        if df_trigger is None or len(df_trigger) < lookback + 1:
             return False
 
         if self._is_on_cooldown(symbol, "volume_spike"):
@@ -209,15 +210,15 @@ class Scanner:
 
         multiplier = VOLUME_SPIKE.get("multiplier", 5.0)
         min_vol = VOLUME_SPIKE.get("min_volume_usdt", 50_000)
-        current_vol = float(df_15m["quote_volume"].iloc[-1])
-        avg_vol = float(df_15m["quote_volume"].iloc[-lookback - 1:-1].mean())
+        current_vol = float(df_trigger["quote_volume"].iloc[-1])
+        avg_vol = float(df_trigger["quote_volume"].iloc[-lookback - 1:-1].mean())
 
         if avg_vol <= 0:
             return False
 
         ratio = current_vol / avg_vol
         if ratio >= multiplier and current_vol >= min_vol:
-            price = float(df_15m["close"].iloc[-1])
+            price = float(df_trigger["close"].iloc[-1])
             logger.info(f"🚨 HACİM SPIKE: {symbol} | Hacim: {current_vol:,.0f} ({ratio:.1f}x ortalama)")
             self._send_volume_spike_alert(symbol, price, current_vol, avg_vol, ratio)
             self.alert_cooldowns[(symbol, "volume_spike")] = datetime.now()
@@ -228,10 +229,11 @@ class Scanner:
     def _send_volume_spike_alert(self, symbol: str, price: float, current_vol: float, avg_vol: float, ratio: float):
         quote = "TRY" if symbol.endswith("TRY") else "USDT"
         base = symbol.replace("TRY", "").replace("USDT", "")
+        trigger_tf = next((tf for tf, (w, _, _) in OCC_TIMEFRAMES.items() if w == 0), "5m")
         message = (
             f"🚨 <b>ANORMAL HACİM — {base}/{quote}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📊 <b>15dk Hacim:</b> {current_vol:,.0f} {quote}\n"
+            f"📊 <b>{trigger_tf} Hacim:</b> {current_vol:,.0f} {quote}\n"
             f"📈 <b>24s Ortalama:</b> {avg_vol:,.0f} {quote}\n"
             f"⚡ <b>Oran:</b> {ratio:.1f}x (>{VOLUME_SPIKE.get('multiplier', 5)}x eşik)\n\n"
             f"💰 <b>Fiyat:</b> {price:,.4f} {quote}\n\n"
@@ -257,12 +259,13 @@ class Scanner:
             if NOTIFY_ALL_TF_CHANGES:
                 result["changes"] = self.analyzer.check_tf_changes(symbol, tf_data)
 
+            trigger_tf = next((tf for tf, (w, _, _) in OCC_TIMEFRAMES.items() if w == 0), "5m")
             signal = self.analyzer.analyze_multi_tf(symbol, tf_data)
             if signal and signal.is_valid_entry:
                 if SEND_CHART_IMAGE:
-                    df_15m = tf_data.get("15m")
-                    if df_15m is not None:
-                        signal._chart_bytes = generate_signal_chart(symbol, df_15m, signal.indicators)
+                    df_trigger = tf_data.get(trigger_tf)
+                    if df_trigger is not None:
+                        signal._chart_bytes = generate_signal_chart(symbol, df_trigger, signal.indicators)
                 result["signal"] = signal
 
         except Exception as e:

@@ -22,10 +22,64 @@ const io = new Server(server, {
     cors: { origin: '*', methods: ['GET', 'POST'] }
 });
 
-// ==================== BINANCE FUTURES PROXY ====================
-const FAPI_BASE   = 'https://fapi.binance.com';
+// ==================== BINANCE TR SPOT PROXY ====================
+const TR_API_BASE = 'https://www.binance.tr';
+const TR_PUBLIC_BASE = 'https://api.binance.me';
 const API_KEY     = process.env.BINANCE_API_KEY     || '';
 const API_SECRET  = process.env.BINANCE_API_SECRET  || '';
+const QUOTE_ASSET = (process.env.QUOTE_ASSET || 'TRY').toUpperCase();
+const MAX_BUDGET_PER_TRADE = parseFloat(process.env.MAX_BUDGET_PER_TRADE || (QUOTE_ASSET === 'TRY' ? '500' : '50'));
+
+const STABLECOIN_BASES = new Set([
+    "USDT", "USDC", "FDUSD", "TUSD", "BUSD", "DAI", 
+    "USDP", "EUR", "GBP", "TRY", "USDE", "PYUSD", 
+    "AEUR", "USTC", "PAXG", "USD"
+]);
+
+function formatTrSymbol(symbol) {
+    if (!symbol) return symbol;
+    const sym = symbol.toUpperCase();
+    if (sym.includes('_')) return sym;
+    if (sym.endsWith('TRY')) {
+        return sym.slice(0, -3) + '_TRY';
+    }
+    if (sym.endsWith('USDT')) {
+        return sym.slice(0, -4) + '_USDT';
+    }
+    return sym;
+}
+
+function mapTrParams(params) {
+    const newParams = { ...params };
+    if (newParams.symbol) {
+        newParams.symbol = formatTrSymbol(newParams.symbol);
+    }
+    if (newParams.side) {
+        const sideUpper = String(newParams.side).toUpperCase();
+        if (sideUpper === 'BUY' || sideUpper === 'LONG') {
+            newParams.side = '0';
+        } else if (sideUpper === 'SELL' || sideUpper === 'SHORT') {
+            newParams.side = '1';
+        }
+    }
+    if (newParams.type) {
+        const typeUpper = String(newParams.type).toUpperCase();
+        if (typeUpper === 'LIMIT') {
+            newParams.type = '1';
+        } else if (typeUpper === 'MARKET') {
+            newParams.type = '2';
+        }
+    }
+    if (newParams.quantity) {
+        const qty = parseFloat(newParams.quantity);
+        newParams.quantity = qty < 1 ? qty.toFixed(4) : qty.toFixed(3);
+    }
+    if (newParams.price) {
+        const price = parseFloat(newParams.price);
+        newParams.price = price.toFixed(4);
+    }
+    return newParams;
+}
 
 function binanceSign(params) {
     const qs = new URLSearchParams({ ...params, timestamp: Date.now() }).toString();
@@ -34,8 +88,16 @@ function binanceSign(params) {
 }
 
 async function fapi(endpoint, params = {}) {
-    const qs = binanceSign(params);
-    const url = `${FAPI_BASE}${endpoint}?${qs}`;
+    const mappedParams = {};
+    for (const [k, v] of Object.entries(params)) {
+        if (k === 'symbol') {
+            mappedParams[k] = formatTrSymbol(v);
+        } else {
+            mappedParams[k] = v;
+        }
+    }
+    const qs = binanceSign(mappedParams);
+    const url = `${TR_API_BASE}${endpoint}?${qs}`;
     const res = await axios.get(url, { 
         headers: { 
             'X-MBX-APIKEY': API_KEY,
@@ -47,7 +109,7 @@ async function fapi(endpoint, params = {}) {
 }
 
 async function fapiPublic(endpoint, params = {}) {
-    const url = `${FAPI_BASE}${endpoint}`;
+    const url = `${TR_PUBLIC_BASE}${endpoint}`;
     const headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     };
@@ -63,11 +125,21 @@ async function fapiPublic(endpoint, params = {}) {
 }
 
 async function fapiPost(endpoint, params = {}) {
-    const qs = binanceSign(params);
-    const url = `${FAPI_BASE}${endpoint}?${qs}`;
-    const res = await axios.post(url, null, { 
+    const mappedParams = mapTrParams(params);
+    const qs = binanceSign(mappedParams);
+    const url = `${TR_API_BASE}${endpoint}`;
+    
+    // Parse the query string to send in the body
+    const sigParams = new URLSearchParams(qs);
+    const payload = {};
+    for (const [key, value] of sigParams.entries()) {
+        payload[key] = value;
+    }
+    
+    const res = await axios.post(url, new URLSearchParams(payload).toString(), { 
         headers: { 
             'X-MBX-APIKEY': API_KEY,
+            'Content-Type': 'application/x-www-form-urlencoded',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         }, 
         timeout: 10000 
@@ -92,82 +164,122 @@ const cache = {
 // ─── Birleşik Dashboard Veri Endpoint'i (Rate Limit & 418 Önleyici) ──────────
 app.get('/api/dashboard/all-data', async (req, res) => {
     try {
-        const symbol = req.query.symbol || 'BTCUSDT';
+        const symbol = req.query.symbol || ('BTC' + QUOTE_ASSET);
         const now = Date.now();
+        let binanceApiError = null;
         
         // 1. Hesap Bakiyesi (Cache veya Sıralı İstek)
         let balanceData = cache.balance.data;
         if (!balanceData || (now - cache.balance.ts) > CACHE_TTL_MS) {
             try {
-                const data = await fapi('/fapi/v2/account');
-                const usdt = data.assets?.find(a => a.asset === 'USDT') || {};
+                const data = await fapi('/open/v1/account/spot');
+                const balances = data.data?.accountAssets || data.data?.balances || data.balances || [];
+                const quoteBal = balances.find(a => a.asset === QUOTE_ASSET) || {};
                 balanceData = {
-                    walletBalance:    parseFloat(usdt.walletBalance    || 0),
-                    availableBalance: parseFloat(usdt.availableBalance || 0),
-                    unrealizedPnl:    parseFloat(usdt.unrealizedProfit || 0),
-                    marginBalance:    parseFloat(usdt.marginBalance    || 0),
-                    totalInitialMargin: parseFloat(data.totalInitialMargin || 0),
+                    walletBalance:    parseFloat(quoteBal.free || 0) + parseFloat(quoteBal.locked || 0),
+                    availableBalance: parseFloat(quoteBal.free || 0),
+                    unrealizedPnl:    0,
+                    marginBalance:    parseFloat(quoteBal.free || 0),
+                    totalInitialMargin: 0,
+                    quoteAsset:       QUOTE_ASSET,
+                    maxBudget:        MAX_BUDGET_PER_TRADE,
                 };
                 cache.balance.data = balanceData;
                 cache.balance.ts = now;
             } catch (e) {
                 console.log("Balance fetch error:", e.message);
+                if (e.response && e.response.data && e.response.data.msg) {
+                    binanceApiError = `Binance Hata Kodu ${e.response.data.code || ''}: ${e.response.data.msg}`;
+                } else if (e.response && e.response.status === 401) {
+                    binanceApiError = "Binance API Hatası: Yetkilendirme Başarısız (HTTP 401). API Key veya Secret geçersiz.";
+                } else {
+                    binanceApiError = `Binance API Bağlantı Hatası: ${e.message}`;
+                }
             }
             await new Promise(r => setTimeout(r, 200)); // 200ms stagger gecikmesi
         }
         
-        // 2. Açık Pozisyonlar
-        let positionsData = cache.positions.data;
-        if (!positionsData || (now - cache.positions.ts) > CACHE_TTL_MS) {
-            try {
-                const data = await fapi('/fapi/v2/positionRisk');
-                positionsData = data.filter(p => parseFloat(p.positionAmt) !== 0);
-                cache.positions.data = positionsData;
-                cache.positions.ts = now;
-            } catch (e) {
-                console.log("Positions fetch error:", e.message);
+        // 2. Açık Pozisyonlar (Spot: Veritabanındaki OPEN işlemler ve anlık PnL)
+        let positionsData = [];
+        try {
+            const openDbPos = await Position.find({ status: 'OPEN' });
+            for (const p of openDbPos) {
+                const sym = p.symbol;
+                const tickerCache = cache.ticker[sym]?.data || {};
+                const currentPrice = parseFloat(tickerCache.lastPrice || p.entry_price || 0);
+                const entry = parseFloat(p.entry_price || 0);
+                const qty = parseFloat(p.quantity || 0);
+                const pnl = (currentPrice - entry) * qty;
+                positionsData.push({
+                    symbol: sym,
+                    positionAmt: qty.toString(),
+                    entryPrice: entry.toString(),
+                    unRealizedProfit: pnl.toFixed(4),
+                    pnlPct: entry > 0 ? ((currentPrice - entry) / entry * 100).toFixed(2) : '0',
+                    marginType: 'spot',
+                    leverage: '1',
+                    liquidationPrice: '0',
+                    positionSide: 'LONG',
+                    markPrice: currentPrice.toString(),
+                    stop_loss_price: p.stop_loss_price || null,
+                    take_profit_price: p.take_profit_price || null,
+                    stars: p.star_label || p.position_tier || '',
+                    allocated_budget: (entry * qty).toFixed(2),
+                    open_time: p.open_time || null,
+                });
             }
-            await new Promise(r => setTimeout(r, 200)); // 200ms stagger gecikmesi
+        } catch (e) {
+            console.log("DB positions fetch error:", e.message);
         }
         
         // 3. Açık Emirler
-        let openOrdersData = cache.openOrders.data;
-        if (!openOrdersData || (now - cache.openOrders.ts) > CACHE_TTL_MS) {
-            try {
-                openOrdersData = await fapi('/fapi/v1/openOrders');
-                cache.openOrders.data = openOrdersData;
-                cache.openOrders.ts = now;
-            } catch (e) {
-                console.log("Open orders fetch error:", e.message);
-            }
-            await new Promise(r => setTimeout(r, 200)); // 200ms stagger gecikmesi
+        let openOrdersData = [];
+        try {
+            // Binance TR requires symbol to query open orders
+            const data = await fapi('/open/v1/orders', { symbol: symbol.toUpperCase() });
+            const list = Array.isArray(data) ? data : (data?.orders || []);
+            openOrdersData = list.filter(o => o.status === 'NEW' || o.status === 'PARTIALLY_FILLED').map(o => ({
+                symbol: o.symbol,
+                side: o.side,
+                type: o.type,
+                origQty: o.quantity || o.origQty,
+                price: o.price,
+                status: o.status,
+                orderId: o.orderId || o.id
+            }));
+        } catch (e) {
+            console.log("Open orders fetch error:", e.message);
         }
         
-        // 4. Son 7 Günlük Gelir/PnL Özeti
-        let incomeData = cache.income.data;
-        if (!incomeData || (now - cache.income.ts) > 8000) { // Gelir verisi daha uzun kalabilir
-            try {
-                const startTime = Date.now() - 7 * 24 * 60 * 60 * 1000;
-                const data = await fapi('/fapi/v1/income', {
-                    incomeType: 'REALIZED_PNL',
-                    startTime,
-                    limit: 100,
-                });
-                const totalPnl = data.reduce((s, x) => s + parseFloat(x.income), 0);
-                incomeData = { items: data, totalPnl: parseFloat(totalPnl.toFixed(4)) };
-                cache.income.data = incomeData;
-                cache.income.ts = now;
-            } catch (e) {
-                console.log("Income fetch error:", e.message);
-            }
-            await new Promise(r => setTimeout(r, 200));
+        // 4. Gelir/PnL Özeti (Lokal MongoDB Veritabanından)
+        let incomeData = { items: [], totalPnl: 0 };
+        try {
+            const closedDbPos = await Position.find({ status: 'CLOSED' }).sort({ close_time: -1 }).limit(100);
+            const total = closedDbPos.reduce((sum, p) => {
+                const entry = parseFloat(p.entry_price || 0);
+                const exit = parseFloat(p.exit_price || 0);
+                const qty = parseFloat(p.quantity || 0);
+                const pnl = (exit - entry) * qty;
+                return sum + pnl;
+            }, 0);
+            incomeData = {
+                items: closedDbPos.map(p => ({
+                    symbol: p.symbol,
+                    income: ((parseFloat(p.exit_price || 0) - parseFloat(p.entry_price || 0)) * parseFloat(p.quantity || 0)).toFixed(4),
+                    time: new Date(p.close_time).getTime(),
+                    info: p.close_reason
+                })),
+                totalPnl: parseFloat(total.toFixed(4))
+            };
+        } catch (e) {
+            console.log("DB income fetch error:", e.message);
         }
         
         // 5. Seçili Parite Fiyatı (Ticker)
         let tickerData = cache.ticker[symbol]?.data;
         if (!tickerData || (now - (cache.ticker[symbol]?.ts || 0)) > CACHE_TTL_MS) {
             try {
-                tickerData = await fapiPublic('/fapi/v1/ticker/24hr', { symbol });
+                tickerData = await fapiPublic('/api/v3/ticker/24hr', { symbol: symbol.toUpperCase() });
                 cache.ticker[symbol] = { data: tickerData, ts: now };
             } catch (e) {
                 console.log("Ticker fetch error:", e.message);
@@ -180,6 +292,7 @@ app.get('/api/dashboard/all-data', async (req, res) => {
             openOrders: openOrdersData || [],
             income: incomeData || { items: [], totalPnl: 0 },
             ticker: tickerData || null,
+            binanceApiError: binanceApiError,
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -194,14 +307,17 @@ app.get('/api/binance/balance', async (req, res) => {
         return res.json(cache.balance.data);
     }
     try {
-        const data = await fapi('/fapi/v2/account');
-        const usdt = data.assets?.find(a => a.asset === 'USDT') || {};
+        const data = await fapi('/open/v1/account/spot');
+        const balances = data.data?.accountAssets || data.data?.balances || data.balances || [];
+        const quoteBal = balances.find(a => a.asset === QUOTE_ASSET) || {};
         const formatted = {
-            walletBalance:    parseFloat(usdt.walletBalance    || 0),
-            availableBalance: parseFloat(usdt.availableBalance || 0),
-            unrealizedPnl:    parseFloat(usdt.unrealizedProfit || 0),
-            marginBalance:    parseFloat(usdt.marginBalance    || 0),
-            totalInitialMargin: parseFloat(data.totalInitialMargin || 0),
+            walletBalance:    parseFloat(quoteBal.free || 0) + parseFloat(quoteBal.locked || 0),
+            availableBalance: parseFloat(quoteBal.free || 0),
+            unrealizedPnl:    0,
+            marginBalance:    parseFloat(quoteBal.free || 0),
+            totalInitialMargin: 0,
+            quoteAsset:       QUOTE_ASSET,
+            maxBudget:        MAX_BUDGET_PER_TRADE,
         };
         cache.balance.data = formatted;
         cache.balance.ts = now;
@@ -215,37 +331,58 @@ app.get('/api/binance/balance', async (req, res) => {
     }
 });
 
-// ─── Açık Futures Pozisyonları ────────────────────────────────────────────
+// ─── Açık Futures Pozisyonları (Spot: Veritabanındaki OPEN işlemler ve anlık PnL)
 app.get('/api/binance/positions', async (req, res) => {
-    const now = Date.now();
-    if (cache.positions.data && (now - cache.positions.ts) < CACHE_TTL_MS) {
-        return res.json(cache.positions.data);
-    }
     try {
-        const data = await fapi('/fapi/v2/positionRisk');
-        const open = data.filter(p => parseFloat(p.positionAmt) !== 0);
-        cache.positions.data = open;
-        cache.positions.ts = now;
-        res.json(open);
-    } catch (e) {
-        if (cache.positions.data) {
-            return res.json(cache.positions.data);
+        const openDbPos = await Position.find({ status: 'OPEN' });
+        const positionsData = [];
+        for (const p of openDbPos) {
+            const sym = p.symbol;
+            const tickerCache = cache.ticker[sym]?.data || {};
+            const currentPrice = parseFloat(tickerCache.lastPrice || p.entry_price || 0);
+            const entry = parseFloat(p.entry_price || 0);
+            const qty = parseFloat(p.quantity || 0);
+            const pnl = (currentPrice - entry) * qty;
+            positionsData.push({
+                symbol: sym,
+                positionAmt: qty.toString(),
+                entryPrice: entry.toString(),
+                unRealizedProfit: pnl.toFixed(4),
+                pnlPct: entry > 0 ? ((currentPrice - entry) / entry * 100).toFixed(2) : '0',
+                marginType: 'spot',
+                leverage: '1',
+                liquidationPrice: '0',
+                positionSide: 'LONG',
+                markPrice: currentPrice.toString(),
+                stop_loss_price: p.stop_loss_price || null,
+                take_profit_price: p.take_profit_price || null,
+                stars: p.star_label || p.position_tier || '',
+                allocated_budget: (entry * qty).toFixed(2),
+                open_time: p.open_time || null,
+            });
         }
+        res.json(positionsData);
+    } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
 // ─── Açık Emirler ─────────────────────────────────────────────────────────
 app.get('/api/binance/open-orders', async (req, res) => {
-    const now = Date.now();
-    if (cache.openOrders.data && (now - cache.openOrders.ts) < CACHE_TTL_MS) {
-        return res.json(cache.openOrders.data);
-    }
     try {
-        const data = await fapi('/fapi/v1/openOrders');
-        cache.openOrders.data = data;
-        cache.openOrders.ts = now;
-        res.json(data);
+        const symbol = req.query.symbol || 'BTCUSDT';
+        const data = await fapi('/open/v1/orders', { symbol: symbol.toUpperCase() });
+        const list = Array.isArray(data) ? data : (data?.orders || []);
+        const formatted = list.filter(o => o.status === 'NEW' || o.status === 'PARTIALLY_FILLED').map(o => ({
+            symbol: o.symbol,
+            side: o.side,
+            type: o.type,
+            origQty: o.quantity || o.origQty,
+            price: o.price,
+            status: o.status,
+            orderId: o.orderId || o.id
+        }));
+        res.json(formatted);
     } catch (e) {
         if (cache.openOrders.data) {
             return res.json(cache.openOrders.data);
@@ -254,33 +391,43 @@ app.get('/api/binance/open-orders', async (req, res) => {
     }
 });
 
-// ─── Son İşlem Geçmişi ────────────────────────────────────────────────────
+// ─── Son İşlem Geçmişi (Spot) ─────────────────────────────────────────────
 app.get('/api/binance/trade-history', async (req, res) => {
     try {
         const symbol = req.query.symbol || 'BTCUSDT';
         const limit  = parseInt(req.query.limit) || 20;
-        const data   = await fapi('/fapi/v1/userTrades', { symbol, limit });
-        res.json(data);
+        const data   = await fapi('/open/v1/orders', { symbol, limit });
+        const list = Array.isArray(data) ? data : (data?.orders || []);
+        res.json(list.filter(o => o.status === 'FILLED'));
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// ─── PnL Özeti (son 7 gün) ────────────────────────────────────────────────
+// ─── PnL Özeti (son 7 gün - Lokal Veritabanından) ──────────────────────────
 app.get('/api/binance/income', async (req, res) => {
     const now = Date.now();
     if (cache.income.data && (now - cache.income.ts) < CACHE_TTL_MS) {
         return res.json(cache.income.data);
     }
     try {
-        const startTime = Date.now() - 7 * 24 * 60 * 60 * 1000;
-        const data = await fapi('/fapi/v1/income', {
-            incomeType: 'REALIZED_PNL',
-            startTime,
-            limit: 100,
-        });
-        const totalPnl = data.reduce((s, x) => s + parseFloat(x.income), 0);
-        const formatted = { items: data, totalPnl: parseFloat(totalPnl.toFixed(4)) };
+        const closedDbPos = await Position.find({ status: 'CLOSED' }).sort({ close_time: -1 }).limit(100);
+        const total = closedDbPos.reduce((sum, p) => {
+            const entry = parseFloat(p.entry_price || 0);
+            const exit = parseFloat(p.exit_price || 0);
+            const qty = parseFloat(p.quantity || 0);
+            const pnl = (exit - entry) * qty;
+            return sum + pnl;
+        }, 0);
+        const formatted = {
+            items: closedDbPos.map(p => ({
+                symbol: p.symbol,
+                income: ((parseFloat(p.exit_price || 0) - parseFloat(p.entry_price || 0)) * parseFloat(p.quantity || 0)).toFixed(4),
+                time: new Date(p.close_time).getTime(),
+                info: p.close_reason
+            })),
+            totalPnl: parseFloat(total.toFixed(4))
+        };
         cache.income.data = formatted;
         cache.income.ts = now;
         res.json(formatted);
@@ -296,7 +443,7 @@ app.get('/api/binance/income', async (req, res) => {
 app.get('/api/binance/klines', async (req, res) => {
     try {
         const { symbol = 'BTCUSDT', interval = '15m', limit = 100 } = req.query;
-        const data = await fapiPublic('/fapi/v1/klines', { symbol, interval, limit });
+        const data = await fapiPublic('/api/v3/klines', { symbol: symbol.toUpperCase(), interval, limit });
         const formatted = data.map(k => ({
             time:   Math.floor(k[0] / 1000),
             open:   parseFloat(k[1]),
@@ -321,7 +468,7 @@ app.get('/api/binance/orderbook', async (req, res) => {
     }
     try {
         const limit  = 20; // Binance geçerli değer: 5,10,20,50,100
-        const data = await fapiPublic('/fapi/v1/depth', { symbol, limit });
+        const data = await fapiPublic('/api/v3/depth', { symbol: symbol.toUpperCase(), limit });
         const formatted = {
             bids: data.bids.slice(0, 10).map(([p, q]) => ({ price: parseFloat(p), qty: parseFloat(q) })),
             asks: data.asks.slice(0, 10).map(([p, q]) => ({ price: parseFloat(p), qty: parseFloat(q) })),
@@ -345,7 +492,7 @@ app.get('/api/binance/ticker', async (req, res) => {
         return res.json(symbolCache.data);
     }
     try {
-        const data = await fapiPublic('/fapi/v1/ticker/24hr', { symbol });
+        const data = await fapiPublic('/api/v3/ticker/24hr', { symbol: symbol.toUpperCase() });
         cache.ticker[symbol] = { data: data, ts: now };
         res.json(data);
     } catch (e) {
@@ -356,7 +503,7 @@ app.get('/api/binance/ticker', async (req, res) => {
     }
 });
 
-// ─── Tüm USDT-P Coin'leri ─────────────────────────────────────────────────
+// ─── Tüm Spot Coin'leri (QUOTE_ASSET bazlı) ──────────────────────────────
 app.get('/api/binance/all-tickers', async (req, res) => {
     const now = Date.now();
     // all-tickers daha büyük bir veridir, 30 saniye cache uygulayalım
@@ -364,9 +511,13 @@ app.get('/api/binance/all-tickers', async (req, res) => {
         return res.json(cache.allTickers.data);
     }
     try {
-        const data = await fapiPublic('/fapi/v1/ticker/24hr');
+        const data = await fapiPublic('/api/v3/ticker/24hr');
         const usdt = data
-            .filter(t => t.symbol.endsWith('USDT'))
+            .filter(t => {
+                if (!t.symbol.endsWith(QUOTE_ASSET)) return false;
+                const base = t.symbol.slice(0, -QUOTE_ASSET.length);
+                return !STABLECOIN_BASES.has(base);
+            })
             .map(t => ({
                 symbol:         t.symbol,
                 lastPrice:      parseFloat(t.lastPrice),
@@ -471,17 +622,19 @@ app.post('/api/positions/close', async (req, res) => {
         const posSide = side || 'LONG';
         const orderSide = posSide === 'LONG' ? 'SELL' : 'BUY';
         
-        // Binance'te kapatma emri gönder
-        const order = await fapiPost('/fapi/v1/order', {
+        // Binance'te kapatma emri gönder (Spot: positionSide parametresi kaldırılır)
+        const order = await fapiPost('/open/v1/orders', {
             symbol: symbol.toUpperCase(),
             side: orderSide,
-            positionSide: posSide,
             type: 'MARKET',
             quantity: Math.abs(parseFloat(quantity)).toString(),
         });
         
-        if (order && order.orderId) {
-            const exitPrice = parseFloat(order.avgPrice || 0);
+        // Binance.TR yanıtı: {code:0, msg:'Success', data:{orderId:..., executedPrice:...}}
+        const orderData = order && order.code === 0 ? (order.data || order) : null;
+        
+        if (orderData && orderData.orderId) {
+            const exitPrice = parseFloat(orderData.executedPrice || orderData.avgPrice || 0);
             
             // MongoDB'deki ilgili açık pozisyonu bul ve güncelle
             const openPos = await Position.findOne({ symbol: symbol, status: 'OPEN' });
@@ -506,9 +659,10 @@ app.post('/api/positions/close', async (req, res) => {
                     }
                 );
             }
-            res.json({ success: true, order });
+            res.json({ success: true, order: orderData });
         } else {
-            res.status(500).json({ error: 'Binance pozisyon kapatma emri başarısız oldu' });
+            console.error('Pozisyon kapatma hatası:', JSON.stringify(order));
+            res.status(500).json({ error: `Binance pozisyon kapatma emri başarısız: ${order?.msg || 'Bilinmeyen hata'}` });
         }
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -531,21 +685,23 @@ app.post('/api/signals/execute', async (req, res) => {
         const positionPct = sig.position_size_pct || 100;
         const allocated = budget * (positionPct / 100);
         
-        // Kaldıraç 5x varsayılan
-        const rawQty = (allocated * 5) / currentPrice;
+        // Kaldıraç 1x (Spot Trading)
+        const rawQty = allocated / currentPrice;
         const quantity = Math.max(Math.round(rawQty * 1000) / 1000, 0.001);
         
-        // Binance'te LONG pozisyon aç
-        const order = await fapiPost('/fapi/v1/order', {
+        // Binance'te Spot alım emri aç (positionSide parametresi kaldırılır)
+        const order = await fapiPost('/open/v1/orders', {
             symbol: sig.symbol,
             side: 'BUY',
-            positionSide: 'LONG',
             type: 'MARKET',
             quantity: quantity.toString(),
         });
         
-        if (order && order.orderId) {
-            const fillPrice = parseFloat(order.avgPrice || currentPrice);
+        // Binance.TR yanıtı: {code:0, msg:'Success', data:{orderId:..., executedPrice:...}}
+        const orderData = order && order.code === 0 ? (order.data || order) : null;
+        
+        if (orderData && orderData.orderId) {
+            const fillPrice = parseFloat(orderData.executedPrice || orderData.avgPrice || currentPrice) || currentPrice;
             
             // Sinyali EXECUTED yap
             await Signal.updateOne(
@@ -570,7 +726,7 @@ app.post('/api/signals/execute', async (req, res) => {
                 stop_loss_price: Math.round(fillPrice * (1 - slPct / 100) * 1000000) / 1000000,
                 take_profit_price: Math.round(fillPrice * (1 + tpPct / 100) * 1000000) / 1000000,
                 quantity: quantity,
-                order_id: order.orderId,
+                order_id: orderData.orderId,
                 signal_id: sig._id,
                 matched_pattern: sig.matched_pattern || '',
                 total_score: sig.total_score || 0,
@@ -583,10 +739,120 @@ app.post('/api/signals/execute', async (req, res) => {
             });
             await positionDoc.save();
             
-            res.json({ success: true, order });
+            res.json({ success: true, order: orderData });
         } else {
-            res.status(500).json({ error: 'Binance emri gönderilemedi' });
+            console.error('Sinyal tetikleme hatası:', JSON.stringify(order));
+            res.status(500).json({ error: `Binance emri gönderilemedi: ${order?.msg || 'Bilinmeyen hata'}` });
         }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ─── Manuel Emir Gönderimi (Order Panel Entegrasyonu) ───────────────────────
+app.post('/api/orders/place', async (req, res) => {
+    try {
+        const { symbol, side, type, quantity, price, stopLossPct, takeProfitPct } = req.body;
+        if (!symbol || !side || !type || !quantity) {
+            return res.status(400).json({ error: 'Eksik zorunlu parametreler' });
+        }
+
+        // 1. Spot trading has no leverage, skip leverage setting
+
+        // 2. Emir Parametrelerini Hazırla (positionSide Spot'ta bulunmaz)
+        const orderParams = {
+            symbol: symbol.toUpperCase(),
+            side: side.toUpperCase(),
+            type: type.toUpperCase(),
+            quantity: Math.abs(parseFloat(quantity)).toString(),
+        };
+
+        if (type.toUpperCase() === 'LIMIT') {
+            if (!price) return res.status(400).json({ error: 'Limit emir için fiyat girilmelidir' });
+            orderParams.price = price.toString();
+            orderParams.timeInForce = 'GTC';
+        }
+
+        // 3. Binance'te İşlemi Aç (Spot orders endpoint)
+        const order = await fapiPost('/open/v1/orders', orderParams);
+
+        // Binance.TR yanıtı: {code:0, msg:'Success', data:{orderId:..., executedPrice:...}}
+        const orderData = order && order.code === 0 ? (order.data || order) : null;
+        
+        if (orderData && orderData.orderId) {
+            // 4. Eğer AÇILIŞ emri (BUY) ise MongoDB'ye kaydet
+            const isOpening = side.toUpperCase() === 'BUY';
+            
+            if (isOpening) {
+                const fillPrice = parseFloat(orderData.executedPrice || orderData.avgPrice || price || 0) || parseFloat(price || 0);
+                const slPct = parseFloat(stopLossPct) || 0;
+                const tpPct = parseFloat(takeProfitPct) || 0;
+                
+                let stopLossPrice = null;
+                let takeProfitPrice = null;
+
+                if (slPct > 0) {
+                    stopLossPrice = Math.round(fillPrice * (1 - slPct / 100) * 1000000) / 1000000;
+                }
+                if (tpPct > 0) {
+                    takeProfitPrice = Math.round(fillPrice * (1 + tpPct / 100) * 1000000) / 1000000;
+                }
+
+                const positionDoc = new Position({
+                    symbol: symbol.toUpperCase(),
+                    side: 'LONG',
+                    entry_price: fillPrice,
+                    stop_loss_price: stopLossPrice,
+                    take_profit_price: takeProfitPrice,
+                    quantity: Math.abs(parseFloat(quantity)),
+                    order_id: orderData.orderId,
+                    signal_id: null,
+                    matched_pattern: 'MANUAL_TRADE',
+                    total_score: 0,
+                    status: 'OPEN',
+                    open_time: new Date(),
+                    close_time: null,
+                    close_reason: null,
+                    exit_price: null,
+                    final_pnl_pct: null,
+                });
+                await positionDoc.save();
+            }
+
+            res.json({ success: true, order: orderData });
+        } else {
+            console.error('Manuel emir hatası:', JSON.stringify(order));
+            res.status(500).json({ error: `Binance emri gönderilemedi: ${order?.msg || 'Bilinmeyen hata'}` });
+        }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ─── Pozisyon Yönünü Anında Tersine Çevirme (Reverse) ────────────────────────
+app.post('/api/positions/reverse', async (req, res) => {
+    return res.status(400).json({ error: 'Spot piyasada kaldıraçlı işlemler veya açığa satış (SHORT) olmadığı için pozisyon yönünü tersine çevirme özelliği desteklenmemektedir.' });
+});
+
+// ─── Pozisyon Korumalarını Güncelle (SL/TP Ayarla) ───────────────────────────
+app.post('/api/positions/update-protection', async (req, res) => {
+    try {
+        const { symbol, stopLossPrice, takeProfitPrice } = req.body;
+        if (!symbol) {
+            return res.status(400).json({ error: 'Eksik parite bilgisi' });
+        }
+
+        const openPos = await Position.findOne({ symbol: symbol.toUpperCase(), status: 'OPEN' });
+        if (!openPos) {
+            return res.status(404).json({ error: 'Açık pozisyon bulunamadı' });
+        }
+
+        const updates = {};
+        if (stopLossPrice !== undefined) updates.stop_loss_price = stopLossPrice ? parseFloat(stopLossPrice) : null;
+        if (takeProfitPrice !== undefined) updates.take_profit_price = takeProfitPrice ? parseFloat(takeProfitPrice) : null;
+
+        await Position.updateOne({ _id: openPos._id }, { $set: updates });
+        res.json({ success: true, updates });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -658,9 +924,12 @@ io.on('connection', (socket) => {
 const FRONTEND_DIST = path.join(__dirname, '../dashboard_frontend/dist');
 if (fs.existsSync(FRONTEND_DIST)) {
     app.use(express.static(FRONTEND_DIST));
-    // React SPA için tüm bilinmeyen route'ları index.html'e yönlendir (Express v5 uyumlu)
-    app.get(/.*/, (req, res) => {
-        res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
+    // React SPA için tüm bilinmeyen route'ları index.html'e yönlendir (Hata önleyici middleware)
+    app.use((req, res, next) => {
+        if (req.method === 'GET' && !req.url.startsWith('/api')) {
+            return res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
+        }
+        next();
     });
     console.log(`📦 Frontend static dosyaları servis ediliyor: ${FRONTEND_DIST}`);
 } else {

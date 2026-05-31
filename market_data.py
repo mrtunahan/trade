@@ -1,7 +1,8 @@
 # ============================================================================
-# market_data.py - Binance Global Futures (USDT-M Perpetual) Veri Çekici
+# market_data.py - Binance.TR Spot Veri Çekici ve Emir Motoru
 # ============================================================================
 import time
+import math
 import hmac
 import hashlib
 import logging
@@ -10,6 +11,7 @@ from urllib.parse import urlencode
 
 import requests
 import pandas as pd
+from pymongo import MongoClient
 
 from config import (
     BINANCE_API_KEY,
@@ -20,16 +22,18 @@ from config import (
     MIN_VOLUME_USDT,
     KLINE_INTERVAL,
     KLINE_LIMIT,
+    QUOTE_ASSET,
+    STABLECOIN_BASES,
 )
 
 logger = logging.getLogger("MarketData")
 
-
 class MarketData:
-    """Binance Global Vadeli İşlemler (USDT-M Perpetual Futures) istemcisi."""
+    """Binance.TR Spot (Kaldıraçsız Spot Alım/Satım) istemcisi."""
 
     def __init__(self):
-        self.base_url = BINANCE_BASE_URL
+        self.base_url = "https://api.binance.me"  # Kamu verileri için
+        self.signed_base_url = "https://www.binance.tr"  # İmzalı cüzdan/emir işlemleri için
         self.api_key = BINANCE_API_KEY
         self.api_secret = BINANCE_API_SECRET
         self.session = requests.Session()
@@ -41,6 +45,10 @@ class MarketData:
         )
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
+
+        # Sembol filtreleri cache: {symbol: {stepSize, minQty, tickSize, minNotional}}
+        self._symbol_filters: dict = {}
+        self._filters_loaded = False
 
     def _send_public_request(self, endpoint: str, params: dict = None, timeout: int = 15) -> Optional[dict]:
         """Gönderilen genel istekleri rate limit (429/418) korumasıyla iletir."""
@@ -67,7 +75,7 @@ class MarketData:
     # ==================== GÜVENLİK VE İMZA ====================
 
     def _generate_signature(self, query_string: str) -> str:
-        """Binance Futures API imzalı istekleri için HMAC-SHA256 üretir."""
+        """Binance.TR Spot API imzalı istekleri için HMAC-SHA256 üretir."""
         return hmac.new(
             self.api_secret.encode("utf-8"),
             query_string.encode("utf-8"),
@@ -77,7 +85,7 @@ class MarketData:
     def _send_signed_request(
         self, method: str, endpoint: str, params: dict = None
     ) -> Optional[dict]:
-        """İmzalı özel API isteklerini Binance Futures'a iletir."""
+        """İmzalı özel API isteklerini Binance.TR Spot'a iletir."""
         if params is None:
             params = {}
 
@@ -85,68 +93,84 @@ class MarketData:
         query_string = urlencode(params)
         signature = self._generate_signature(query_string)
 
-        url = f"{self.base_url}{endpoint}?{query_string}&signature={signature}"
+        headers = {
+            "X-MBX-APIKEY": self.api_key,
+            "User-Agent": "Mozilla/5.0"
+        }
 
         try:
             if method.upper() == "GET":
-                resp = self.session.get(url, timeout=15)
+                url = f"{self.signed_base_url}{endpoint}?{query_string}&signature={signature}"
+                resp = self.session.get(url, headers=headers, timeout=15)
             elif method.upper() == "POST":
-                resp = self.session.post(url, timeout=15)
+                # For POST requests, Binance.TR Open API expects parameters in application/x-www-form-urlencoded body
+                url = f"{self.signed_base_url}{endpoint}"
+                payload = params.copy()
+                payload["signature"] = signature
+                headers["Content-Type"] = "application/x-www-form-urlencoded"
+                resp = self.session.post(url, data=payload, headers=headers, timeout=15)
             elif method.upper() == "DELETE":
-                resp = self.session.delete(url, timeout=15)
+                url = f"{self.signed_base_url}{endpoint}?{query_string}&signature={signature}"
+                resp = self.session.delete(url, headers=headers, timeout=15)
             else:
                 return None
 
             if resp.status_code != 200:
                 logger.error(
-                    f"Futures İmzalı İstek Hatası ({endpoint}): {resp.text}"
+                    f"❌ Binance.TR İmzalı İstek Hatası ({endpoint}) [HTTP {resp.status_code}]: {resp.text}"
                 )
                 return None
-            return resp.json()
+            
+            res_json = resp.json()
+            if isinstance(res_json, dict) and res_json.get("code", 0) != 0:
+                logger.error(
+                    f"❌ Binance.TR API Hata Yanıtı ({endpoint}): {res_json}"
+                )
+            return res_json
         except Exception as e:
-            logger.error(f"Futures Bağlantı Hatası ({endpoint}): {e}")
+            logger.error(f"❌ Binance.TR Bağlantı Hatası ({endpoint}): {e}")
             return None
 
-    # ==================== PERPETUAL PARİTE KEŞFİ ====================
+    # ==================== SPOT PARİTE KEŞFİ ====================
 
     def get_all_pairs(self) -> dict:
         """
-        Aktif USDT Perpetual sözleşmelerini getirir.
-        Returns: {"USDT": ["BTCUSDT", ...], "TRY": []}
+        Aktif Spot çiftlerini getirir.
         """
         if PAIR_MODE == "manual":
             return {"USDT": MANUAL_USDT_PAIRS, "TRY": []}
 
         try:
-            data = self._send_public_request("/fapi/v1/exchangeInfo", timeout=15)
+            data = self._send_public_request("/api/v3/exchangeInfo", timeout=15)
             if not data:
                 return {"USDT": MANUAL_USDT_PAIRS, "TRY": []}
 
-            usdt_pairs = []
+            discovered_pairs = []
             for s in data.get("symbols", []):
+                base_asset = s.get("baseAsset", "").upper()
                 if (
                     s.get("status") == "TRADING"
-                    and s.get("quoteAsset") == "USDT"
-                    and s.get("contractType") == "PERPETUAL"
+                    and s.get("quoteAsset") == QUOTE_ASSET
+                    and base_asset not in STABLECOIN_BASES
                 ):
-                    usdt_pairs.append(s["symbol"])
+                    discovered_pairs.append(s["symbol"])
 
             logger.info(
-                f"Keşfedilen Aktif USDT Perpetual sözleşme sayısı: {len(usdt_pairs)}"
+                f"Keşfedilen Aktif {QUOTE_ASSET} Spot çifti sayısı: {len(discovered_pairs)}"
             )
-            return {"USDT": sorted(usdt_pairs), "TRY": []}
+            return {"USDT": sorted(discovered_pairs), QUOTE_ASSET: sorted(discovered_pairs), "TRY": []}
 
         except Exception as e:
-            logger.error(f"Futures parite keşif hatası: {e}")
+            logger.error(f"Spot parite keşif hatası: {e}")
             return {"USDT": MANUAL_USDT_PAIRS, "TRY": []}
 
     def filter_by_volume(self, pairs: list) -> list:
-        """Minimum 24s hacim filtresini uygular (Futures quoteVolume USDT cinsindendir)."""
+        """Minimum 24s hacim filtresini uygular."""
         if MIN_VOLUME_USDT <= 0:
             return pairs
 
         try:
-            tickers_list = self._send_public_request("/fapi/v1/ticker/24hr", timeout=15)
+            tickers_list = self._send_public_request("/api/v3/ticker/24hr", timeout=15)
             if not tickers_list:
                 return pairs
             tickers = {t["symbol"]: t for t in tickers_list}
@@ -156,7 +180,6 @@ class MarketData:
                 ticker = tickers.get(symbol)
                 if not ticker:
                     continue
-                # Futures quoteVolume doğrudan USDT cinsindendir
                 vol_usdt = float(ticker.get("quoteVolume", 0))
                 if vol_usdt >= MIN_VOLUME_USDT:
                     filtered.append(symbol)
@@ -168,16 +191,16 @@ class MarketData:
             return filtered
 
         except Exception as e:
-            logger.error(f"Futures hacim filtresi hatası: {e}")
+            logger.error(f"Spot hacim filtresi hatası: {e}")
             return pairs
 
-    # ==================== FUTURES MUM VERİSİ (OHLCV) ====================
+    # ==================== SPOT MUM VERİSİ (OHLCV) ====================
 
     def get_klines(
         self, symbol: str, interval: str = None, limit: int = None
     ) -> Optional[pd.DataFrame]:
         """
-        Futures mum (OHLCV) verisini DataFrame olarak döndürür.
+        Spot mum (OHLCV) verisini DataFrame olarak döndürür.
         Kolonlar: open, high, low, close, volume, quote_volume
         """
         interval = interval or KLINE_INTERVAL
@@ -185,7 +208,7 @@ class MarketData:
 
         try:
             params = {"symbol": symbol, "interval": interval, "limit": limit}
-            data = self._send_public_request("/fapi/v1/klines", params=params, timeout=15)
+            data = self._send_public_request("/api/v3/klines", params=params, timeout=15)
 
             if not data:
                 return None
@@ -212,15 +235,15 @@ class MarketData:
             return df
 
         except Exception as e:
-            logger.warning(f"Futures {symbol} mum verisi hatası: {e}")
+            logger.warning(f"Spot {symbol} mum verisi hatası: {e}")
             return None
 
     # ==================== ANLIK FİYAT ====================
 
     def get_price(self, symbol: str) -> Optional[float]:
-        """Futures anlık fiyatı döner."""
+        """Spot anlık fiyatı döner."""
         try:
-            data = self._send_public_request("/fapi/v1/ticker/price", params={"symbol": symbol}, timeout=10)
+            data = self._send_public_request("/api/v3/ticker/price", params={"symbol": symbol}, timeout=10)
             if not data:
                 return None
             return float(data["price"])
@@ -228,35 +251,115 @@ class MarketData:
             return None
 
     def get_ticker_24h(self, symbol: str) -> Optional[dict]:
-        """24 saatlik Futures ticker bilgisi."""
+        """24 saatlik Spot ticker bilgisi."""
         try:
-            data = self._send_public_request("/fapi/v1/ticker/24hr", params={"symbol": symbol}, timeout=10)
+            data = self._send_public_request("/api/v3/ticker/24hr", params={"symbol": symbol}, timeout=10)
             return data
         except Exception:
             return None
 
-    # ==================== VADELİ HESAP BAKİYESİ ====================
+    # ==================== SPOT HESAP BAKİYESİ ====================
 
-    def get_available_balance(self, asset: str = "USDT") -> float:
+    def get_available_balance(self, asset: str = QUOTE_ASSET) -> float:
         """
-        Futures cüzdanındaki kullanılabilir bakiyeyi döner.
-        /fapi/v2/account endpoint'i kullanır.
+        Binance.TR Spot cüzdanındaki kullanılabilir bakiyeyi döner.
         """
-        data = self._send_signed_request("GET", "/fapi/v2/account")
-        if data and "assets" in data:
-            for a in data["assets"]:
-                if a["asset"] == asset:
-                    return float(a["availableBalance"])
+        data = self._send_signed_request("GET", "/open/v1/account/spot")
+        if data:
+            # Binance.TR response wrapper parses to {"code": 0, "msg": "Success", "data": {"accountAssets": [...]}}
+            inner_data = data.get("data") if isinstance(data.get("data"), dict) else data
+            balances = (inner_data.get("accountAssets") or inner_data.get("balances")) if isinstance(inner_data, dict) else None
+            if balances:
+                for a in balances:
+                    if a.get("asset") == asset:
+                        return float(a.get("free", 0.0))
         return 0.0
 
-    def get_all_positions(self) -> list:
-        """Açık Futures pozisyonlarını döner (positionAmt != 0 olanlar)."""
-        data = self._send_signed_request("GET", "/fapi/v2/positionRisk")
-        if not data:
-            return []
-        return [p for p in data if float(p.get("positionAmt", 0)) != 0]
 
-    # ==================== FUTURES EMİR MOTORU ====================
+    def get_all_positions(self) -> list:
+        """Açık Spot işlemlerini döner (lokal MongoDB'den)."""
+        try:
+            client = MongoClient("mongodb://localhost:27017/", serverSelectionTimeoutMS=2000)
+            db = client["trade_bot"]
+            return list(db["positions"].find({"status": "OPEN"}))
+        except Exception:
+            return []
+
+    def _format_tr_symbol(self, symbol: str) -> str:
+        """Sinyal veya genel sembol adını Binance.TR formatına (örn. STRAX_TRY) dönüştürür."""
+        sym = symbol.upper()
+        if "_" in sym:
+            return sym
+        if sym.endswith("TRY"):
+            return sym[:-3] + "_TRY"
+        if sym.endswith("USDT"):
+            return sym[:-4] + "_USDT"
+        return sym
+
+    # ==================== SEMBOL FİLTRE YÖNETİMİ ====================
+
+    def _load_symbol_filters(self):
+        """Tüm Binance.TR sembol filtrelerini yükler (stepSize, tickSize, minNotional)."""
+        if self._filters_loaded:
+            return
+        try:
+            resp = self.session.get("https://www.binance.tr/open/v1/common/symbols", timeout=15)
+            data = resp.json()
+            symbols = data.get("data", {}).get("list", [])
+            for s in symbols:
+                sym = s.get("symbol", "")
+                filters = {}
+                for f in s.get("filters", []):
+                    if f.get("filterType") == "LOT_SIZE":
+                        filters["stepSize"] = float(f.get("stepSize", "1"))
+                        filters["minQty"] = float(f.get("minQty", "0.001"))
+                    elif f.get("filterType") == "PRICE_FILTER":
+                        filters["tickSize"] = float(f.get("tickSize", "0.01"))
+                    elif f.get("filterType") == "NOTIONAL":
+                        filters["minNotional"] = float(f.get("minNotional", "10"))
+                if filters:
+                    self._symbol_filters[sym] = filters
+            self._filters_loaded = True
+            logger.info(f"✅ {len(self._symbol_filters)} sembol filtresi yüklendi.")
+        except Exception as e:
+            logger.warning(f"⚠️ Sembol filtreleri yüklenemedi: {e}")
+
+    def _get_symbol_filters(self, tr_symbol: str) -> dict:
+        """Belirli bir sembol için filtre bilgilerini döndürür."""
+        if not self._filters_loaded:
+            self._load_symbol_filters()
+        return self._symbol_filters.get(tr_symbol, {})
+
+    def _format_quantity(self, quantity: float, tr_symbol: str) -> str:
+        """Miktar değerini sembolün stepSize'ına göre formatlar."""
+        filters = self._get_symbol_filters(tr_symbol)
+        step_size = filters.get("stepSize", 0.001)
+        min_qty = filters.get("minQty", 0.001)
+
+        # stepSize'a göre aşağı yuvarla
+        if step_size >= 1:
+            formatted_qty = math.floor(quantity / step_size) * int(step_size)
+            return str(int(formatted_qty))
+        else:
+            precision = max(0, int(round(-math.log10(step_size))))
+            formatted_qty = math.floor(quantity / step_size) * step_size
+            formatted_qty = max(formatted_qty, min_qty)
+            return f"{formatted_qty:.{precision}f}"
+
+    def _format_price(self, price: float, tr_symbol: str) -> str:
+        """Fiyat değerini sembolün tickSize'ına göre formatlar."""
+        filters = self._get_symbol_filters(tr_symbol)
+        tick_size = filters.get("tickSize", 0.01)
+
+        if tick_size >= 1:
+            formatted_price = math.floor(price / tick_size) * int(tick_size)
+            return str(int(formatted_price))
+        else:
+            precision = max(0, int(round(-math.log10(tick_size))))
+            formatted_price = math.floor(price / tick_size) * tick_size
+            return f"{formatted_price:.{precision}f}"
+
+    # ==================== SPOT EMİR MOTORU ====================
 
     def create_futures_order(
         self,
@@ -265,37 +368,49 @@ class MarketData:
         position_side: str,
         order_type: str,
         quantity: float,
+        price: Optional[float] = None,
     ) -> Optional[dict]:
         """
-        Binance Futures üzerinde Long veya Short yönlü emir açar.
-
-        Args:
-            symbol:        Parite (örn: "BTCUSDT")
-            side:          "BUY" (Long aç / Short kapat) | "SELL" (Short aç / Long kapat)
-            position_side: "LONG" veya "SHORT"
-            order_type:    "MARKET" veya "LIMIT"
-            quantity:      İşlem miktarı (kontrat bazı)
+        Binance.TR Spot üzerinde alım veya satım emri açar.
         """
-        endpoint = "/fapi/v1/order"
+        endpoint = "/open/v1/orders"
+        
+        tr_symbol = self._format_tr_symbol(symbol)
+        side_val = 0 if side.upper() == "BUY" else 1
+        type_val = 1 if order_type.upper() == "LIMIT" else 2
+        
+        # Dinamik miktar ve fiyat formatlama (stepSize/tickSize uyumlu)
+        qty_str = self._format_quantity(quantity, tr_symbol)
+        
         params = {
-            "symbol": symbol,
-            "side": side.upper(),
-            "positionSide": position_side.upper(),
-            "type": order_type.upper(),
-            "quantity": f"{quantity:.3f}",
+            "symbol": tr_symbol,
+            "side": str(side_val),
+            "type": str(type_val),
+            "quantity": qty_str,
         }
+        if price is not None:
+            params["price"] = self._format_price(price, tr_symbol)
+            
         logger.info(
-            f"Futures Emir -> {symbol} | {side} {position_side} | "
-            f"{order_type} | Miktar: {quantity}"
+            f"Spot Emir -> {tr_symbol} | Side: {side} ({side_val}) | Type: {order_type} ({type_val}) | Miktar: {qty_str}" + (f" | Fiyat: {params['price']}" if price else "")
         )
         return self._send_signed_request("POST", endpoint, params)
 
     def cancel_futures_order(self, symbol: str, order_id: int) -> Optional[dict]:
-        """Açık bir Futures emrini iptal eder."""
-        params = {"symbol": symbol, "orderId": order_id}
-        return self._send_signed_request("DELETE", "/fapi/v1/order", params)
+        """Açık bir Spot emrini iptal eder."""
+        tr_symbol = self._format_tr_symbol(symbol)
+        params = {
+            "symbol": tr_symbol,
+            "orderId": str(order_id)
+        }
+        logger.info(f"Spot Emir İptal -> {tr_symbol} | OrderId: {order_id}")
+        return self._send_signed_request("POST", "/open/v1/orders/cancel", params)
 
     def get_futures_order_status(self, symbol: str, order_id: int) -> Optional[dict]:
-        """Bir Futures emrinin durumunu (FILLED, NEW vb.) sorgular."""
-        params = {"symbol": symbol, "orderId": order_id}
-        return self._send_signed_request("GET", "/fapi/v1/order", params)
+        """Bir Spot emrinin durumunu sorgular."""
+        tr_symbol = self._format_tr_symbol(symbol)
+        params = {
+            "symbol": tr_symbol,
+            "orderId": str(order_id)
+        }
+        return self._send_signed_request("GET", "/open/v1/orders", params)
