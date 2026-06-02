@@ -1,26 +1,13 @@
 # ============================================================================
-# analyzer.py - Hiyerarşik Multi-TF OCC Analiz Motoru
+# analyzer.py - Spot Pipeline Trend & Reversal Analyzer
 # ============================================================================
-# 5 timeframe'de OCC (Open Close Cross) durumu kontrol eder.
-# Haftalık(3p) + Günlük(2p) + 4H(2p) + 1H(1p) + 15dk(tetikleyici)
-# Toplam ≥5 puan + 15dk yeşil → ALIM sinyali
-#
-# RSI: giriş kalitesi filtresi (30-50 ideal, 70+ dikkat)
-# ADX: trend gücü filtresi (>25 trend var, <15 zayıf)
-# ============================================================================
-
 import logging
 import math
 from dataclasses import dataclass, field
 from typing import Optional
-
 import numpy as np
 import pandas as pd
-
-from config import (
-    OCC_TIMEFRAMES, OCC_MIN_SCORE, OCC_PERIOD, OCC_MA_TYPE, OCC_MIN_STRENGTH,
-    RSI_CONFIG, ADX_CONFIG, DYNAMIC_STOP_LOSS, SIGNAL_FILTER, VOLUME_FILTER,
-)
+from config import SPOT_PIPELINE
 
 logger = logging.getLogger("Analyzer")
 
@@ -33,707 +20,97 @@ def _safe_float(series, index=-1, default=float("nan")) -> float:
         return default
 
 
-def _calc_ma(series: pd.Series, period: int, ma_type: str = "SMMA") -> pd.Series:
-    """
-    Pine Script OCC indikatöründeki tüm MA tiplerini destekler.
-    Orijinal indikatörün varsayılanı: SMMA, periyot 8.
-    """
-    ma_type = ma_type.upper()
-    if ma_type == "SMA":
-        return series.rolling(period).mean()
-    elif ma_type == "EMA":
-        return series.ewm(span=period, adjust=False).mean()
-    elif ma_type == "DEMA":
-        ema1 = series.ewm(span=period, adjust=False).mean()
-        ema2 = ema1.ewm(span=period, adjust=False).mean()
-        return 2 * ema1 - ema2
-    elif ma_type == "TEMA":
-        ema1 = series.ewm(span=period, adjust=False).mean()
-        ema2 = ema1.ewm(span=period, adjust=False).mean()
-        ema3 = ema2.ewm(span=period, adjust=False).mean()
-        return 3 * ema1 - 3 * ema2 + ema3
-    elif ma_type == "WMA":
-        weights = np.arange(1, period + 1, dtype=float)
-        return series.rolling(period).apply(
-            lambda x: np.dot(x, weights) / weights.sum(), raw=True
-        )
-    elif ma_type == "SMMA" or ma_type == "RMA":
-        # Pine Script: v7 := na(v7[1]) ? sma(src, len) : (v7[1] * (len - 1) + src) / len
-        # Bu, alpha=1/period olan EWM ile eşdeğerdir
-        return series.ewm(alpha=1.0 / period, adjust=False).mean()
-    elif ma_type == "HULLMA":
-        half_len = int(period / 2)
-        sqrt_len = int(round(np.sqrt(period)))
-        wma_half = series.rolling(half_len).apply(
-            lambda x: np.dot(x, np.arange(1, half_len + 1, dtype=float)) / np.arange(1, half_len + 1).sum(), raw=True
-        )
-        wma_full = series.rolling(period).apply(
-            lambda x: np.dot(x, np.arange(1, period + 1, dtype=float)) / np.arange(1, period + 1).sum(), raw=True
-        )
-        hull_src = 2 * wma_half - wma_full
-        return hull_src.rolling(sqrt_len).apply(
-            lambda x: np.dot(x, np.arange(1, sqrt_len + 1, dtype=float)) / np.arange(1, sqrt_len + 1).sum(), raw=True
-        )
-    elif ma_type == "LSMA":
-        return series.rolling(period).apply(
-            lambda x: np.polyval(np.polyfit(np.arange(period), x, 1), period - 1), raw=True
-        )
-    elif ma_type == "TMA":
-        # Triangular MA = SMA of SMA
-        sma1 = series.rolling(period).mean()
-        return sma1.rolling(period).mean()
-    elif ma_type == "SSMA":
-        # SuperSmoother filter (John Ehlers)
-        a1 = np.exp(-1.414 * np.pi / period)
-        b1 = 2 * a1 * np.cos(1.414 * np.pi / period)
-        c2 = b1
-        c3 = -a1 * a1
-        c1 = 1 - c2 - c3
-        result = series.copy().astype(float)
-        vals = series.values.astype(float)
-        res = np.empty_like(vals)
-        res[0] = vals[0]
-        res[1] = vals[1] if len(vals) > 1 else vals[0]
-        for i in range(2, len(vals)):
-            res[i] = c1 * (vals[i] + vals[i - 1]) / 2 + c2 * res[i - 1] + c3 * res[i - 2]
-        return pd.Series(res, index=series.index)
-    else:
-        # Varsayılan: SMMA (orijinal Pine Script varsayılanı)
-        return series.ewm(alpha=1.0 / period, adjust=False).mean()
-
-
-# ==================== OCC TF DURUMU ====================
-
 @dataclass
 class OccTfStatus:
-    """Tek bir timeframe'deki OCC durumu."""
+    """Tek bir gösterge puan durumu (Dashboard ve Telegram heatmap uyumluluğu için)."""
     timeframe: str
-    label: str           # "Haftalık", "Günlük" vb.
-    weight: int          # Bu TF'nin puan ağırlığı
-    is_green: bool       # True = yükseliş (Close MA > Open MA)
-    just_crossed: bool   # True = bu mumda renk değişti
-    close_ma: float      # Son Close MA değeri
-    open_ma: float       # Son Open MA değeri
-    strength: float      # Cross strength (fark yüzdesi)
+    label: str
+    weight: int
+    is_green: bool
+    just_crossed: bool = False
+    close_ma: float = 0.0
+    open_ma: float = 0.0
+    strength: float = 0.0
 
 
 @dataclass
-class MultiTfSignal:
-    """Hiyerarşik multi-TF OCC sinyal sonucu."""
+class SpotPipelineSignal:
+    """Geriye dönük uyumlu ve premium 4-stage spot pipeline sinyal kartı."""
     symbol: str
-    signal_type: str          # "buy", "sell", "info", "tf_change"
+    signal_type: str  # "buy", "info", "tf_change"
     price: float
-    tf_statuses: list         # [OccTfStatus, ...]
-    total_score: int          # Ağırlıklı puan toplamı
-    max_score: int            # Maksimum mümkün puan
-    trigger_tf: str           # Tetikleyici TF ("15m")
-    trigger_crossed: bool     # 15dk'da yeni cross oldu mu
-
-    # RSI ve ADX filtreleri
+    tf_statuses: list  # [OccTfStatus, ...] (Dashboard uyumluluğu için)
+    total_score: int
+    max_score: int
+    trigger_tf: str
+    trigger_crossed: bool
+    segment_type: str  # "STRONG" veya "WEAK"
+    
     rsi_value: float = float("nan")
-    rsi_quality: str = ""     # "ideal", "ok", "caution", "blocked"
+    rsi_quality: str = "ok"
     adx_value: float = float("nan")
-    adx_regime: str = ""      # "trending", "ranging", "weak"
-
-    # SL/TP
+    adx_regime: str = "ranging"
+    
     stop_loss_pct: float = 3.0
     take_profit_pct: float = 6.0
-
-    # Volume filter metrics
-    volume_value: float = float("nan")
-    volume_ma_value: float = float("nan")
-    volume_filter_passed: bool = True
-
-    # Meta
+    
+    candlestick_pattern: str = ""  # Ekstra onay desenleri veya tetik açıklaması
     indicators: dict = field(default_factory=dict)
-    market_regime: str = "unknown"
-    candlestick_pattern: str = ""
 
     @property
     def is_valid_entry(self) -> bool:
-        """
-        Giriş sinyali geçerli mi?
-
-        Desen bazlı dinamik eşik sistemi:
-        1. Tanımlı desenlerden biri eşleşirse → o desenin ADX/RSI eşikleri
-        2. Full Sniper (puan >= 7) → kendi ADX/RSI eşikleri
-        3. Puan >= 6 + üst TF koruması → genel eşikler (score_fallback)
-        """
-        # Temel koşullar: 15dk tetikleyici yeşil olmalı
-        if not self.trigger_crossed:
-            return False
-
-        # Minimum puan kontrolü
-        if self.total_score < OCC_MIN_SCORE:
-            return False
-
-        cfg = SIGNAL_FILTER
-        if not cfg.get("enabled", False):
-            # Filtre kapalıysa eski davranış
-            return self.rsi_quality != "blocked"
-
-        # RSI blocked ise her durumda engelle (>= 80)
-        if self.rsi_quality == "blocked":
-            return False
-
-        # ADX veya RSI hesaplanamadıysa geçirme
-        if math.isnan(self.adx_value) or math.isnan(self.rsi_value):
-            return False
-
-        # OCC dizilimini çıkar: {timeframe: is_green}
-        current_pattern = {s.timeframe: s.is_green for s in self.tf_statuses}
-
-        # ---- Kural 1: Tanımlı desen eşleşmesi (desen bazlı eşikler) ----
-        for allowed in cfg.get("allowed_patterns", []):
-            pattern = allowed.get("pattern", {})
-            if all(current_pattern.get(tf) == expected
-                   for tf, expected in pattern.items()):
-                # Bu desen eşleşti — desenin kendi eşiklerini kullan
-                min_adx = allowed.get("min_adx", 20)
-                max_adx = allowed.get("max_adx", 100)
-                min_rsi = allowed.get("min_rsi", 35)
-                if self.adx_value > min_adx and self.adx_value <= max_adx and self.rsi_value >= min_rsi:
-                    self._matched_pattern = allowed.get("name", "Desen")
-                    return True
-                return False  # Desen eşleşti ama eşikler tutmadı
-
-        # ---- Kural 2: Full Sniper (tüm üst TF'ler yeşil) ----
-        if cfg.get("allow_full_sniper", True):
-            sniper_score = cfg.get("full_sniper_min_score", 7)
-            if self.total_score >= sniper_score:
-                min_adx = cfg.get("full_sniper_min_adx", 22)
-                min_rsi = cfg.get("full_sniper_min_rsi", 45)
-                if self.adx_value > min_adx and self.rsi_value >= min_rsi:
-                    self._matched_pattern = "Full Sniper"
-                    return True
-
-        # ---- Kural 3: Puan bazlı geçiş (score_fallback) ----
-        fallback = cfg.get("score_fallback", {})
-        if fallback.get("enabled", False):
-            fb_min_score = fallback.get("min_score", 6)
-            if self.total_score >= fb_min_score:
-                # Üst TF koruması: 1d veya 4h'den en az biri yeşil olmalı
-                if fallback.get("require_upper_tf", True):
-                    has_upper = current_pattern.get("1d", False) or current_pattern.get("4h", False)
-                    if not has_upper:
-                        return False
-                min_adx = fallback.get("min_adx", 22)
-                min_rsi = fallback.get("min_rsi", 45)
-                if self.adx_value > min_adx and self.rsi_value >= min_rsi:
-                    self._matched_pattern = "Puan Geçişi"
-                    return True
-
-        return False
+        # Sinyal zaten tetiklendiyse True döner
+        return self.trigger_crossed and self.signal_type == "buy"
 
     @property
     def matched_pattern_name(self) -> str:
-        """Eşleşen desen ve mum formasyonu adını birleştirir."""
-        occ_pat = getattr(self, "_matched_pattern", "")
-        cand_pat = getattr(self, "candlestick_pattern", "")
-        if occ_pat and cand_pat:
-            return f"{occ_pat} // {cand_pat}"
-        return occ_pat or cand_pat or "OCC Sinyali"
+        return f"{self.segment_type} SEGMENT // {self.candlestick_pattern}"
 
     @property
     def signal_star_rating(self) -> dict:
-        """
-        Yıldız bazlı kalite sistemi.
-        Returns: {"stars": "⭐⭐", "label": "Güçlü Sinyal", "position_pct": 75}
-        """
-        cfg = SIGNAL_FILTER.get("star_rating", {})
-        if not cfg.get("enabled", False):
-            # Eski davranış
-            if self.total_score >= 7:
-                return {"stars": "⭐⭐⭐", "label": "Full Sniper", "position_pct": 100}
-            elif self.total_score >= 5:
-                return {"stars": "⭐⭐", "label": "Güçlü Sinyal", "position_pct": 75}
-            return {"stars": "⭐", "label": "Fırsat", "position_pct": 50}
-
-        for tier in cfg.get("tiers", []):
-            if self.total_score >= tier["min_score"]:
-                return {
-                    "stars": tier["stars"],
-                    "label": tier["label"],
-                    "position_pct": tier["position_pct"],
-                }
-        return {"stars": "⭐", "label": "Fırsat", "position_pct": 50}
+        # Puanlama sistemine göre star rating (Dashboard & Telegram uyumluluğu)
+        if self.segment_type == "STRONG":
+            stars = "⭐⭐⭐" if self.total_score >= 7 else "⭐⭐"
+            label = "Full Sniper" if self.total_score >= 7 else "Güçlü Trend"
+            position_pct = 100 if self.total_score >= 7 else 75
+        else:
+            stars = "⭐⭐" if self.total_score >= 6 else "⭐"
+            label = "Dip Avcısı" if self.total_score >= 6 else "Tepki Alımı"
+            position_pct = 75 if self.total_score >= 6 else 50
+            
+        return {"stars": stars, "label": label, "position_pct": position_pct}
 
     @property
-    def score_pct(self) -> float:
-        return self.total_score / self.max_score if self.max_score > 0 else 0.0
-
-    # Eski Signal uyumluluğu
-    @property
-    def strength(self):
-        return self.total_score
+    def position_size_pct(self) -> float:
+        return self.signal_star_rating["position_pct"] / 100.0
 
     @property
-    def total_criteria(self):
-        return self.max_score
-
-    @property
-    def strength_pct(self):
-        return self.score_pct
-
-    @property
-    def criteria_met(self):
-        return [s.timeframe for s in self.tf_statuses if s.is_green]
-
-    @property
-    def criteria_details(self):
-        details = {}
-        for s in self.tf_statuses:
-            details[s.timeframe] = {
-                "met": s.is_green,
-                "detail": f"{s.label} OCC {'Yeşil' if s.is_green else 'Kırmızı'} (güç: {s.strength:.3f}%)",
-                "description": f"{s.label} {'yükseliş' if s.is_green else 'düşüş'}",
-                "weight": s.weight,
-            }
-        return details
-
-    @property
-    def exit_score(self):
-        return 0
-
-    @property
-    def exit_details(self):
-        return {}
-
-    @property
-    def position_size_pct(self):
-        rating = self.signal_star_rating
-        return rating["position_pct"] / 100.0
-
-    @property
-    def position_tier(self):
-        rating = self.signal_star_rating
-        return rating["label"]
+    def position_tier(self) -> str:
+        return self.signal_star_rating["label"]
 
 
-# ==================== ANA ANALİZ MOTORU ====================
-
-class MultiTfOccAnalyzer:
+class SpotPipelineAnalyzer:
     """
-    Hiyerarşik Multi-Timeframe OCC Analiz Motoru.
-
-    Her sembol için 5 timeframe'de OCC durumunu kontrol eder,
-    ağırlıklı puanlama yapar, RSI/ADX filtreleri uygular.
+    Spot Pipeline Trend ve Reversal Analiz Motoru.
+    Görevi: Günlük göstergeleri puanlamak (Aşama 3) ve alt zaman dilimlerinde tetik kontrolü yapmak (Aşama 4).
     """
 
     def __init__(self):
-        self.occ_period = OCC_PERIOD
-        self.occ_ma_type = OCC_MA_TYPE
-        self.occ_min_strength = OCC_MIN_STRENGTH
-
-        # Önceki OCC durumlarını cache'le (renk değişimi tespiti için)
-        # {(symbol, timeframe): is_green}
-        self._prev_occ_state = {}
-
-    def _check_volume_filter(self, df: pd.DataFrame) -> tuple:
-        """
-        Tetikleyici timeframe'deki son tamamlanmış mumun hacminin,
-        hacim hareketli ortalamasının (Volume MA) üzerinde olup olmadığını kontrol eder.
-        Non-repaint: iloc[-2] kullanır.
-        Returns: (passed, vol_now, vol_ma_now)
-        """
-        if not VOLUME_FILTER.get("enabled", True):
-            return True, float("nan"), float("nan")
-
-        lookback = VOLUME_FILTER.get("lookback_bars", 20)
-        if df is None or len(df) < lookback + 1:
-            return False, float("nan"), float("nan")
-
-        volume = df["volume"]
-        vol_ma = volume.rolling(lookback).mean()
-
-        vol_now = _safe_float(volume, -2)
-        vol_ma_now = _safe_float(vol_ma, -2)
-
-        if math.isnan(vol_now) or math.isnan(vol_ma_now) or vol_ma_now == 0:
-            return False, float("nan"), float("nan")
-
-        ratio = vol_now / vol_ma_now
-        multiplier = VOLUME_FILTER.get("multiplier", 1.0)
-        return (ratio >= multiplier), vol_now, vol_ma_now
-
-    def analyze_multi_tf(self, symbol: str,
-                          tf_data: dict) -> Optional[MultiTfSignal]:
-        """
-        Tüm timeframe'lerde OCC durumunu analiz eder.
-
-        Args:
-            symbol: Parite ismi (örn: "BIOTRY")
-            tf_data: {timeframe: DataFrame} — 5 TF'nin mum verisi
-
-        Returns: MultiTfSignal veya None
-        """
-        if not tf_data:
-            return None
-
-        # Dynamically determine trigger timeframe (weight is 0)
-        trigger_tf = next((tf for tf, (w, _, _) in OCC_TIMEFRAMES.items() if w == 0), "5m")
-
-        tf_statuses = []
-        total_score = 0
-        max_score = 0
-        trigger_crossed = False
-
-        for tf, (weight, _, label) in OCC_TIMEFRAMES.items():
-            df = tf_data.get(tf)
-            if df is None or len(df) < 30:
-                # Veri yoksa bu TF'yi atla (kırmızı say)
-                tf_statuses.append(OccTfStatus(
-                    timeframe=tf, label=label, weight=weight,
-                    is_green=False, just_crossed=False,
-                    close_ma=0, open_ma=0, strength=0,
-                ))
-                if tf != trigger_tf:
-                    max_score += weight
-                continue
-
-            # OCC hesapla (just_crossed veriden gelir, state'den değil)
-            occ_status = self._check_occ_status(df, tf)
-            occ_status.label = label
-            occ_status.weight = weight
-
-            tf_statuses.append(occ_status)
-
-            if tf == trigger_tf:
-                # Tetikleyici — puan vermez, sadece cross kontrolü
-                trigger_crossed = occ_status.just_crossed and occ_status.is_green
-            else:
-                max_score += weight
-                if occ_status.is_green:
-                    total_score += weight
-
-        # Tetikleyici verisi yoksa tetikleyici olamaz
-        trigger_df = tf_data.get(trigger_tf)
-        if trigger_df is None or len(trigger_df) < 30:
-            trigger_crossed = False
-
-        # Volume filter
-        vol_passed, vol_val, vol_ma_val = self._check_volume_filter(trigger_df)
-        if trigger_crossed and not vol_passed:
-            logger.info(f"🚫 Hacim Filtresi Engeli: {symbol} tetikleyici hacim ({vol_val:.1f}) MA ({vol_ma_val:.1f}) altında.")
-            trigger_crossed = False
-
-        # RSI hesapla (tetikleyici veya 1H verisinden)
-        rsi_value = float("nan")
-        rsi_quality = ""
-        rsi_df = tf_data.get(trigger_tf)
-        if rsi_df is None:
-            rsi_df = tf_data.get("1h")
-        if rsi_df is not None and len(rsi_df) >= 20 and RSI_CONFIG.get("enabled"):
-            rsi_value = self._calculate_rsi(rsi_df)
-            rsi_quality = self._assess_rsi_quality(rsi_value)
-
-        # ADX hesapla (1H verisinden)
-        adx_value = float("nan")
-        adx_regime = "unknown"
-        adx_df = tf_data.get("1h")
-        if adx_df is None:
-            adx_df = tf_data.get("4h")
-        if adx_df is not None and len(adx_df) >= 30 and ADX_CONFIG.get("enabled"):
-            adx_value = self._calculate_adx_value(adx_df)
-            adx_regime = self._assess_adx_regime(adx_value)
-
-        # Fiyat (tetikleyici verisinden başlayarak en alt TF'den çek)
-        price = 0.0
-        for tf_key in list(OCC_TIMEFRAMES.keys()):
-            df = tf_data.get(tf_key)
-            if df is not None and len(df) > 0:
-                price = float(df["close"].iloc[-1])
-                break
-
-        # SL/TP hesapla
-        sl_pct, tp_pct = self._calculate_sl_tp(adx_value)
-
-        # Mum formasyonu tespiti (Tetikleyici timeframe verisinden)
-        candlestick_pattern = ""
-        if trigger_df is not None and len(trigger_df) >= 10:
-            candlestick_pattern = self._detect_candlestick_patterns(trigger_df)
-
-        # Complete Series data enrichment for visual charts
-        enriched_indicators = {"rsi_value": rsi_value, "adx_value": adx_value}
-        if trigger_df is not None and len(trigger_df) >= 30:
-            try:
-                enriched_indicators["ema_9"] = trigger_df["close"].ewm(span=9, adjust=False).mean()
-                enriched_indicators["ema_21"] = trigger_df["close"].ewm(span=21, adjust=False).mean()
-                enriched_indicators["ema_200"] = trigger_df["close"].ewm(span=200, adjust=False).mean()
-                bb_middle = trigger_df["close"].rolling(20).mean()
-                bb_std = trigger_df["close"].rolling(20).std()
-                enriched_indicators["bb_upper"] = bb_middle + 2 * bb_std
-                enriched_indicators["bb_lower"] = bb_middle - 2 * bb_std
-                enriched_indicators["vol_ma"] = trigger_df["volume"].rolling(20).mean()
-                # Whole RSI series
-                delta = trigger_df["close"].diff()
-                gain = delta.where(delta > 0, 0.0).rolling(14).mean()
-                loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-                rs = gain / loss.replace(0, np.nan)
-                enriched_indicators["rsi"] = 100 - (100 / (1 + rs))
-            except Exception as chart_err:
-                logger.error(f"Enriched indicators calculation failed for {symbol}: {chart_err}")
-
-        signal = MultiTfSignal(
-            symbol=symbol,
-            signal_type="buy" if trigger_crossed and total_score >= OCC_MIN_SCORE else "info",
-            price=price,
-            tf_statuses=tf_statuses,
-            total_score=total_score,
-            max_score=max_score,
-            trigger_tf=trigger_tf,
-            trigger_crossed=trigger_crossed,
-            rsi_value=rsi_value,
-            rsi_quality=rsi_quality,
-            adx_value=adx_value,
-            adx_regime=adx_regime,
-            stop_loss_pct=sl_pct,
-            take_profit_pct=tp_pct,
-            market_regime=adx_regime,
-            indicators=enriched_indicators,
-            candlestick_pattern=candlestick_pattern,
-            volume_value=vol_val,
-            volume_ma_value=vol_ma_val,
-            volume_filter_passed=vol_passed,
-        )
-
-        return signal
-
-    def _detect_candlestick_patterns(self, df: pd.DataFrame) -> str:
-        """
-        15 dakikalık tetikleyici mum verisi (df) üzerinde 16 temel mum formasyonunu analiz eder.
-        Non-repaint: Tamamlanmış son mumları (-2, -3, -4, vb.) temel alır.
-        """
-        if df is None or len(df) < 10:
-            return ""
-
-        try:
-            opens = df["open"]
-            highs = df["high"]
-            lows = df["low"]
-            closes = df["close"]
-
-            def get_val(series, idx):
-                return float(series.iloc[idx])
-
-            # Son 7 tamamlanmış mum (veya son 7 indeks) değerlerini al
-            # o[-2] -> son tamamlanmış mum, o[-3] -> sondan bir önceki mum vb.
-            o = [get_val(opens, i) for i in range(-7, 0)]
-            h = [get_val(highs, i) for i in range(-7, 0)]
-            l = [get_val(lows, i) for i in range(-7, 0)]
-            c = [get_val(closes, i) for i in range(-7, 0)]
-
-            # Son tamamlanmış mum özellikleri (-2)
-            body2 = abs(c[-2] - o[-2])
-            upper_shadow2 = h[-2] - max(o[-2], c[-2])
-            lower_shadow2 = min(o[-2], c[-2]) - l[-2]
-            range2 = h[-2] - l[-2]
-            is_green2 = c[-2] > o[-2]
-            is_red2 = c[-2] < o[-2]
-
-            # Sondan bir önceki mum özellikleri (-3)
-            body3 = abs(c[-3] - o[-3])
-            upper_shadow3 = h[-3] - max(o[-3], c[-3])
-            lower_shadow3 = min(o[-3], c[-3]) - l[-3]
-            range3 = h[-3] - l[-3]
-            is_green3 = c[-3] > o[-3]
-            is_red3 = c[-3] < o[-3]
-
-            # Sondan iki önceki mum özellikleri (-4)
-            body4 = abs(c[-4] - o[-4])
-            is_red4 = c[-4] < o[-4]
-            is_green4 = c[-4] > o[-4]
-
-            # Trend yönü (son 5 tamamlanmış mumun fiyat değişimi)
-            trend = (c[-2] - c[-7]) / c[-7] if c[-7] != 0 else 0
-
-            # 1. Doji
-            if range2 > 0 and body2 <= 0.1 * range2:
-                return "Doji"
-
-            # 2. Üç Beyaz Asker (Three White Soldiers)
-            if (is_green4 and is_green3 and is_green2 and 
-                    c[-2] > c[-3] > c[-4] and o[-2] > o[-3] > o[-4]):
-                return "Üç Beyaz Asker"
-
-            # 3. Üç Kara Karga (Three Black Crows)
-            if (is_red4 and is_red3 and is_red2 and 
-                    c[-2] < c[-3] < c[-4] and o[-2] < o[-3] < o[-4]):
-                return "Üç Kara Karga"
-
-            # 4. Boğa Yutan (Bullish Engulfing)
-            if is_red3 and is_green2 and c[-2] > o[-3] and o[-2] < c[-3]:
-                return "Boğa Yutan"
-
-            # 5. Ayı Yutan (Bearish Engulfing)
-            if is_green3 and is_red2 and c[-2] < o[-3] and o[-2] > c[-3]:
-                return "Ayı Yutan"
-
-            # 6. Delen Çizgi (Piercing Line)
-            if is_red3 and is_green2 and o[-2] < c[-3] and c[-2] > (o[-3] + c[-3]) / 2 and c[-2] < o[-3]:
-                return "Delen Çizgi"
-
-            # 7. Kara Bulut Örtüsü (Dark Cloud Cover)
-            if is_green3 and is_red2 and o[-2] > c[-3] and c[-2] < (o[-3] + c[-3]) / 2 and c[-2] > o[-3]:
-                return "Kara Bulut Örtüsü"
-
-            # 8. Sabah Yıldızı (Morning Star)
-            if is_red4 and body3 <= 0.3 * body4 and is_green2 and c[-2] > (o[-4] + c[-4]) / 2:
-                return "Sabah Yıldızı"
-
-            # 9. Akşam Yıldızı (Evening Star)
-            if is_green4 and body3 <= 0.3 * body4 and is_red2 and c[-2] < (o[-4] + c[-4]) / 2:
-                return "Akşam Yıldızı"
-
-            # 10. Çekiç (Hammer) ve 11. Asılı Adam (Hanging Man)
-            if body2 > 0 and lower_shadow2 >= 2.0 * body2 and upper_shadow2 <= 0.15 * body2:
-                if trend < 0:
-                    return "Çekiç (Hammer)"
-                else:
-                    return "Asılı Adam (Hanging Man)"
-
-            # 12. Ters Çekiç (Inverted Hammer) ve 13. Kayan Yıldız (Shooting Star)
-            if body2 > 0 and upper_shadow2 >= 2.0 * body2 and lower_shadow2 <= 0.15 * body2:
-                if trend < 0:
-                    return "Ters Çekiç"
-                else:
-                    return "Kayan Yıldız"
-
-            # 14. Fırıldak (Spinning Top)
-            if range2 > 0 and body2 <= 0.3 * range2 and upper_shadow2 >= 0.3 * range2 and lower_shadow2 >= 0.3 * range2:
-                return "Fırıldak"
-
-            # 15. Yükselen Üç Yöntem (Rising Three Methods)
-            if (is_green4 and is_green2 and is_red3 and is_red3 and is_red3 and 
-                    c[-2] > c[-4] and min(l[-3], l[-3], l[-3]) > l[-4] and max(h[-3], h[-3], h[-3]) < h[-4]):
-                return "Yükselen Üç Yöntem"
-
-            # 16. Düşen Üç Yöntem (Falling Three Methods)
-            if (is_red4 and is_red2 and is_green3 and is_green3 and is_green3 and 
-                    c[-2] < c[-4] and max(h[-3], h[-3], h[-3]) < h[-4] and min(l[-3], l[-3], l[-3]) > l[-4]):
-                return "Düşen Üç Yöntem"
-
-        except Exception as e:
-            logger.error(f"Mum formasyon tespiti hatası: {str(e)}")
-
-        return ""
-
-    def check_tf_changes(self, symbol: str,
-                         tf_data: dict) -> list:
-        """
-        Her timeframe'deki OCC renk değişimlerini tespit eder.
-        Her değişim ayrı bir bildirim olarak döndürülür.
-
-        Returns: [MultiTfSignal, ...] — renk değişen TF'ler
-        """
-        changes = []
-
-        for tf, (weight, _, label) in OCC_TIMEFRAMES.items():
-            df = tf_data.get(tf)
-            if df is None or len(df) < 30:
-                continue
-
-            occ_status = self._check_occ_status(df, tf)
-            prev_state = self._prev_occ_state.get((symbol, tf))
-
-            if prev_state is not None and prev_state != occ_status.is_green:
-                # Renk değişti!
-                occ_status.just_crossed = True
-                occ_status.label = label
-                occ_status.weight = weight
-
-                price = float(df["close"].iloc[-1])
-
-                change_signal = MultiTfSignal(
-                    symbol=symbol,
-                    signal_type="tf_change",
-                    price=price,
-                    tf_statuses=[occ_status],
-                    total_score=weight if occ_status.is_green else 0,
-                    max_score=weight,
-                    trigger_tf=tf,
-                    trigger_crossed=occ_status.is_green,
-                    market_regime="unknown",
-                )
-                changes.append(change_signal)
-
-            # State güncelle
-            self._prev_occ_state[(symbol, tf)] = occ_status.is_green
-
-        return changes
-
-    # ==================== OCC HESAPLAMA ====================
-
-    def _check_occ_status(self, df: pd.DataFrame, tf: str) -> OccTfStatus:
-        """
-        Tek bir timeframe için OCC durumunu hesaplar.
-        Non-repaint: iloc[-2] kullanır (son kapanmış mum).
-        """
-        close = df["close"]
-        open_ = df["open"]
-
-        close_ma = _calc_ma(close, self.occ_period, self.occ_ma_type)
-        open_ma = _calc_ma(open_, self.occ_period, self.occ_ma_type)
-
-        # Non-repaint: Son kapanmış mumu kullan
-        c_now = _safe_float(close_ma, -2)
-        o_now = _safe_float(open_ma, -2)
-        c_prev = _safe_float(close_ma, -3)
-        o_prev = _safe_float(open_ma, -3)
-
-        if math.isnan(c_now) or math.isnan(o_now):
-            return OccTfStatus(
-                timeframe=tf, label="", weight=0,
-                is_green=False, just_crossed=False,
-                close_ma=0, open_ma=0, strength=0,
-            )
-
-        is_green = c_now > o_now
-
-        # Cross tespiti (son mumda renk değişti mi)
-        just_crossed = False
-        if not (math.isnan(c_prev) or math.isnan(o_prev)):
-            was_green = c_prev > o_prev
-            just_crossed = is_green != was_green
-
-        # Strength: Pine Script formülü: pcd = 50000 * diff / closeOpenAvg
-        avg = (c_now + o_now) / 2 if (c_now + o_now) != 0 else 1
-        strength = 50000.0 * (c_now - o_now) / avg
-
-        return OccTfStatus(
-            timeframe=tf, label="", weight=0,
-            is_green=is_green, just_crossed=just_crossed,
-            close_ma=c_now, open_ma=o_now, strength=strength,
-        )
-
-    # ==================== RSI ====================
-
-    def _calculate_rsi(self, df: pd.DataFrame, period: int = None) -> float:
-        period = period or RSI_CONFIG.get("period", 14)
-        close = df["close"]
-        delta = close.diff()
-        gain = delta.where(delta > 0, 0.0).rolling(period).mean()
-        loss = (-delta.where(delta < 0, 0.0)).rolling(period).mean()
-        rs = gain / loss.replace(0, np.nan)
-        rsi = 100 - (100 / (1 + rs))
-        return _safe_float(rsi, -1)
-
-    def _assess_rsi_quality(self, rsi_value: float) -> str:
-        if math.isnan(rsi_value):
-            return "ok"
-        cfg = RSI_CONFIG
-        if rsi_value >= cfg.get("block_level", 80):
-            return "blocked"
-        elif rsi_value >= cfg.get("caution_level", 70):
-            return "caution"
-        elif cfg.get("ideal_entry_min", 30) <= rsi_value <= cfg.get("ideal_entry_max", 50):
-            return "ideal"
-        return "ok"
-
-    # ==================== ADX ====================
-
-    def _calculate_adx_value(self, df: pd.DataFrame) -> float:
-        period = ADX_CONFIG.get("period", 14)
+        pass
+
+    def calculate_rsi(self, series: pd.Series, period: int = 14) -> pd.Series:
+        delta = series.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+        
+        # Smoothed RS using RMA (Pine Script standard)
+        avg_gain = gain.ewm(alpha=1.0/period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1.0/period, adjust=False).mean()
+        
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        return 100 - (100 / (1 + rs))
+
+    def calculate_adx(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
         high = df["high"]
         low = df["low"]
         close = df["close"]
@@ -748,53 +125,327 @@ class MultiTfOccAnalyzer:
         plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
         minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
 
-        atr = tr.ewm(alpha=1/period, adjust=False).mean()
-        smooth_plus = plus_dm.ewm(alpha=1/period, adjust=False).mean()
-        smooth_minus = minus_dm.ewm(alpha=1/period, adjust=False).mean()
+        atr = tr.ewm(alpha=1.0/period, adjust=False).mean()
+        smooth_plus = plus_dm.ewm(alpha=1.0/period, adjust=False).mean()
+        smooth_minus = minus_dm.ewm(alpha=1.0/period, adjust=False).mean()
 
         plus_di = (smooth_plus / atr.replace(0, np.nan)) * 100
         minus_di = (smooth_minus / atr.replace(0, np.nan)) * 100
 
         dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
-        adx = dx.ewm(alpha=1/period, adjust=False).mean()
+        return dx.ewm(alpha=1.0/period, adjust=False).mean()
 
-        return _safe_float(adx, -1)
+    def analyze_candidate(self, symbol: str, segment: str, daily_df: pd.DataFrame, 
+                          lower_tfs_data: dict) -> Optional[SpotPipelineSignal]:
+        """
+        Her bir aday coin için Aşama 3 (Skorlama) ve Aşama 4 (Tetikleme) kontrolünü gerçekleştirir.
+        
+        Args:
+            symbol: Coin sembolü (örn. "BTC_TRY")
+            segment: "STRONG" (Güçlü 30) veya "WEAK" (Güçsüz 30)
+            daily_df: Günlük mum verisi
+            lower_tfs_data: Alt zaman dilimleri verisi {"5m": df, "15m": df, "1h": df}
+        """
+        if daily_df is None or len(daily_df) < 30:
+            return None
 
-    def _assess_adx_regime(self, adx_value: float) -> str:
-        if math.isnan(adx_value):
-            return "unknown"
-        cfg = ADX_CONFIG
-        if adx_value >= cfg.get("strong_trend", 25):
-            return "trending"
-        elif adx_value <= cfg.get("weak_market", 15):
-            return "weak"
-        return "ranging"
+        closes = daily_df["close"]
+        volumes = daily_df["volume"]
+        
+        # ── GÜNLÜK GÖSTERGELER ──
+        ema50 = closes.ewm(span=50, adjust=False).mean()
+        ema200 = closes.ewm(span=200, adjust=False).mean()
+        rsi = self.calculate_rsi(closes, 14)
+        vol_ma = volumes.rolling(20).mean()
 
-    # ==================== SL/TP ====================
+        # Son kapanmış günlük bar (-2)
+        ema50_val = _safe_float(ema50, -2)
+        ema200_val = _safe_float(ema200, -2)
+        rsi_val = _safe_float(rsi, -2)
+        rsi_prev = _safe_float(rsi, -3)
+        vol_val = _safe_float(volumes, -2)
+        vol_ma_val = _safe_float(vol_ma, -2)
+        
+        price = _safe_float(closes, -1)  # Canlı fiyat son bardır (-1)
 
-    def _calculate_sl_tp(self, adx_value: float) -> tuple:
-        cfg = DYNAMIC_STOP_LOSS
-        if not cfg.get("enabled", False) or math.isnan(adx_value):
-            return cfg.get("base_sl_pct", 3.0), cfg.get("base_tp_pct", 6.0)
+        total_score = 0
+        max_score = 7
+        tf_statuses = []
 
-        if adx_value >= cfg.get("strong_trend_adx", 40):
-            return cfg["trend_sl_pct"], cfg["trend_tp_pct"]
-        elif adx_value <= cfg.get("ranging_adx", 20):
-            return cfg["range_sl_pct"], cfg["range_tp_pct"]
-        return cfg["base_sl_pct"], cfg["base_tp_pct"]
+        cfg = SPOT_PIPELINE["strong"] if segment == "STRONG" else SPOT_PIPELINE["weak"]
+        sl_pct = cfg["base_sl_pct"]
+        tp_pct = cfg["base_tp_pct"]
+
+        # ── AŞAMA 3: SKORLAMA (Trend + Momentum Hibriti) ──
+        if segment == "STRONG":
+            # 1. EMA50 > EMA200 (+3 Puan)
+            ema_ok = ema50_val > ema200_val
+            if ema_ok:
+                total_score += 3
+            tf_statuses.append(OccTfStatus(timeframe="1d_ema", label="Daily EMA50 > EMA200", weight=3, is_green=ema_ok))
+
+            # 2. RSI 55 - 70 (+2 Puan)
+            rsi_ok = 55.0 <= rsi_val <= 70.0
+            if rsi_ok:
+                total_score += 2
+            tf_statuses.append(OccTfStatus(timeframe="1d_rsi", label="Daily RSI (55-70)", weight=2, is_green=rsi_ok))
+
+            # 3. Volume > 20MA * 1.5 (+2 Puan)
+            vol_ok = False
+            if not math.isnan(vol_val) and not math.isnan(vol_ma_val) and vol_ma_val > 0:
+                vol_ok = vol_val > (vol_ma_val * 1.5)
+            if vol_ok:
+                total_score += 2
+            tf_statuses.append(OccTfStatus(timeframe="1d_vol", label="Daily Vol > 1.5xMA", weight=2, is_green=vol_ok))
+
+            score_threshold = SPOT_PIPELINE["strong"]["score_threshold"]
+            
+        else:  # WEAK segment
+            # 1. EMA50 < EMA200 (+0 Puan)
+            ema_ok = ema50_val < ema200_val
+            tf_statuses.append(OccTfStatus(timeframe="1d_ema", label="Daily EMA50 < EMA200", weight=0, is_green=ema_ok))
+
+            # 2. RSI < 30 veya RSI Dip Dönüş (+3 Puan)
+            # RSI dip dönüşü: RSI 30 ile 45 arasında ve dünkünden daha yukarıda (kafayı kaldırmış)
+            rsi_ok = rsi_val < 30.0 or (30.0 <= rsi_val <= 45.0 and rsi_val > rsi_prev)
+            if rsi_ok:
+                total_score += 3
+            tf_statuses.append(OccTfStatus(timeframe="1d_rsi", label="Daily RSI Bottom/Up", weight=3, is_green=rsi_ok))
+
+            # 3. Volume > 20MA * 2.0 (+4 Puan)
+            vol_ok = False
+            if not math.isnan(vol_val) and not math.isnan(vol_ma_val) and vol_ma_val > 0:
+                vol_ok = vol_val > (vol_ma_val * 2.0)
+            if vol_ok:
+                total_score += 4
+            tf_statuses.append(OccTfStatus(timeframe="1d_vol", label="Daily Vol > 2.0xMA", weight=4, is_green=vol_ok))
+
+            score_threshold = SPOT_PIPELINE["weak"]["score_threshold"]
+
+        # Skor yetersizse sinyali iptal et/atla
+        if total_score < score_threshold:
+            return SpotPipelineSignal(
+                symbol=symbol, signal_type="info", price=price, tf_statuses=tf_statuses,
+                total_score=total_score, max_score=max_score, trigger_tf="N/A", trigger_crossed=False,
+                segment_type=segment, rsi_value=rsi_val, adx_value=float("nan"), stop_loss_pct=sl_pct, take_profit_pct=tp_pct
+            )
+
+        # ── AŞAMA 4: TETİK (Zaman Dilimi ve Giriş Stratejisi) ──
+        trigger_crossed = False
+        trigger_tf = "N/A"
+        candlestick_pattern = ""
+
+        if segment == "STRONG":
+            # 5m veya 15m pullback hold veya golden cross kontrolü
+            for tf in ["5m", "15m"]:
+                df_lower = lower_tfs_data.get(tf)
+                if df_lower is None or len(df_lower) < 55:
+                    continue
+
+                lows_lower = df_lower["low"]
+                closes_lower = df_lower["close"]
+                
+                ema9_lower = closes_lower.ewm(span=9, adjust=False).mean()
+                ema20_lower = closes_lower.ewm(span=20, adjust=False).mean()
+                ema50_lower = closes_lower.ewm(span=50, adjust=False).mean()
+
+                # Golden Cross check
+                gc_ok = ema9_lower.iloc[-2] > ema20_lower.iloc[-2] and ema9_lower.iloc[-3] <= ema20_lower.iloc[-3]
+                
+                # Pullback checks (Low <= EMA, Close >= EMA)
+                pb_ema20 = lows_lower.iloc[-2] <= ema20_lower.iloc[-2] and closes_lower.iloc[-2] >= ema20_lower.iloc[-2]
+                pb_ema50 = lows_lower.iloc[-2] <= ema50_lower.iloc[-2] and closes_lower.iloc[-2] >= ema50_lower.iloc[-2]
+
+                if gc_ok:
+                    trigger_crossed = True
+                    trigger_tf = tf
+                    candlestick_pattern = "EMA9 > EMA20 Kesişimi (Golden Cross)"
+                    break
+                elif pb_ema20:
+                    trigger_crossed = True
+                    trigger_tf = tf
+                    candlestick_pattern = "EMA20 Pullback (Geri Çekilip Tutunma)"
+                    break
+                elif pb_ema50:
+                    trigger_crossed = True
+                    trigger_tf = tf
+                    candlestick_pattern = "EMA50 Pullback (Geri Çekilip Tutunma)"
+                    break
+        else:
+            # 15m veya 1h RSI dip dönüşü veya golden cross kontrolü
+            for tf in ["15m", "1h"]:
+                df_lower = lower_tfs_data.get(tf)
+                if df_lower is None or len(df_lower) < 30:
+                    continue
+
+                closes_lower = df_lower["close"]
+                rsi_lower = self.calculate_rsi(closes_lower, 14)
+                ema9_lower = closes_lower.ewm(span=9, adjust=False).mean()
+                ema20_lower = closes_lower.ewm(span=20, adjust=False).mean()
+
+                # RSI 30 yukarı kesim check (RSI[-2] > 30 ve RSI[-3] <= 30)
+                rsi_cross = rsi_lower.iloc[-2] > 30.0 and rsi_lower.iloc[-3] <= 30.0
+                
+                # Golden Cross check
+                gc_ok = ema9_lower.iloc[-2] > ema20_lower.iloc[-2] and ema9_lower.iloc[-3] <= ema20_lower.iloc[-3]
+
+                if rsi_cross:
+                    trigger_crossed = True
+                    trigger_tf = tf
+                    candlestick_pattern = "RSI 30 Yukarı Kesim (Aşırı Satım Dönüşü)"
+                    break
+                elif gc_ok:
+                    trigger_crossed = True
+                    trigger_tf = tf
+                    candlestick_pattern = "EMA9 > EMA20 Kesişimi (Dip Formasyonu Onayı)"
+                    break
+
+        # Enriched indicators for matplotlib signal rendering
+        enriched_indicators = {
+            "rsi_value": rsi_val,
+            "vol_ma": vol_ma,
+            "ema_50": ema50,
+            "ema_200": ema200
+        }
+        
+        # If trigger tf is active, enrich lower indicators for chart overlay
+        tr_df = lower_tfs_data.get(trigger_tf)
+        if tr_df is not None and len(tr_df) >= 30:
+            try:
+                enriched_indicators["ema_9"] = tr_df["close"].ewm(span=9, adjust=False).mean()
+                enriched_indicators["ema_21"] = tr_df["close"].ewm(span=20, adjust=False).mean()
+                
+                bb_middle = tr_df["close"].rolling(20).mean()
+                bb_std = tr_df["close"].rolling(20).std()
+                enriched_indicators["bb_upper"] = bb_middle + 2 * bb_std
+                enriched_indicators["bb_lower"] = bb_middle - 2 * bb_std
+                
+                enriched_indicators["vol_ma"] = tr_df["volume"].rolling(20).mean()
+                enriched_indicators["rsi"] = self.calculate_rsi(tr_df["close"], 14)
+            except Exception as chart_err:
+                logger.error(f"Enriched chart indicators computation failed: {chart_err}")
+
+        return SpotPipelineSignal(
+            symbol=symbol,
+            signal_type="buy" if trigger_crossed else "info",
+            price=price,
+            tf_statuses=tf_statuses,
+            total_score=total_score,
+            max_score=max_score,
+            trigger_tf=trigger_tf,
+            trigger_crossed=trigger_crossed,
+            segment_type=segment,
+            rsi_value=rsi_val,
+            adx_value=float("nan"),
+            adx_regime="trending" if segment == "STRONG" else "weak",
+            rsi_quality="ideal" if rsi_ok else "ok",
+            stop_loss_pct=sl_pct,
+            take_profit_pct=tp_pct,
+            candlestick_pattern=candlestick_pattern,
+            indicators=enriched_indicators
+        )
+
+    def _calc_ma(self, series: pd.Series, period: int, ma_type: str = "SMMA") -> pd.Series:
+        ma_type = ma_type.upper()
+        if ma_type == "SMA":
+            return series.rolling(period).mean()
+        elif ma_type == "EMA":
+            return series.ewm(span=period, adjust=False).mean()
+        elif ma_type == "DEMA":
+            ema1 = series.ewm(span=period, adjust=False).mean()
+            ema2 = ema1.ewm(span=period, adjust=False).mean()
+            return 2 * ema1 - ema2
+        elif ma_type == "TEMA":
+            ema1 = series.ewm(span=period, adjust=False).mean()
+            ema2 = ema1.ewm(span=period, adjust=False).mean()
+            ema3 = ema2.ewm(span=period, adjust=False).mean()
+            return 3 * ema1 - 3 * ema2 + ema3
+        elif ma_type == "WMA":
+            weights = np.arange(1, period + 1, dtype=float)
+            return series.rolling(period).apply(
+                lambda x: np.dot(x, weights) / weights.sum(), raw=True
+            )
+        elif ma_type == "SMMA" or ma_type == "RMA":
+            return series.ewm(alpha=1.0 / period, adjust=False).mean()
+        elif ma_type == "HULLMA":
+            half_len = int(period / 2)
+            sqrt_len = int(round(np.sqrt(period)))
+            wma_half = series.rolling(half_len).apply(
+                lambda x: np.dot(x, np.arange(1, half_len + 1, dtype=float)) / np.arange(1, half_len + 1).sum(), raw=True
+            )
+            wma_full = series.rolling(period).apply(
+                lambda x: np.dot(x, np.arange(1, period + 1, dtype=float)) / np.arange(1, period + 1).sum(), raw=True
+            )
+            hull_src = 2 * wma_half - wma_full
+            return hull_src.rolling(sqrt_len).apply(
+                lambda x: np.dot(x, np.arange(1, sqrt_len + 1, dtype=float)) / np.arange(1, sqrt_len + 1).sum(), raw=True
+            )
+        return series.rolling(period).mean()
+
+    def calculate_occ_status(self, df: pd.DataFrame, timeframe: str) -> OccTfStatus:
+        if df is None or len(df) < 15:
+            return OccTfStatus(timeframe=timeframe, label="", weight=0, is_green=False)
+        close = df["close"]
+        open_ = df["open"]
+        close_ma = self._calc_ma(close, period=8, ma_type="SMMA")
+        open_ma = self._calc_ma(open_, period=8, ma_type="SMMA")
+        
+        c_now = _safe_float(close_ma, -2)
+        o_now = _safe_float(open_ma, -2)
+        c_prev = _safe_float(close_ma, -3)
+        o_prev = _safe_float(open_ma, -3)
+        
+        if math.isnan(c_now) or math.isnan(o_now):
+            return OccTfStatus(timeframe=timeframe, label="", weight=0, is_green=False)
+            
+        is_green = c_now > o_now
+        just_crossed = False
+        if not (math.isnan(c_prev) or math.isnan(o_prev)):
+            just_crossed = is_green != (c_prev > o_prev)
+            
+        avg = (c_now + o_now) / 2 if (c_now + o_now) != 0 else 1
+        strength = 50000.0 * (c_now - o_now) / avg
+        
+        occ_labels = {
+            "1w": "Weekly Trend",
+            "1d": "Daily Trend",
+            "4h": "4-Hour Trend",
+            "1h": "1-Hour Trend",
+            "15m": "15-Min Momentum"
+        }
+        
+        return OccTfStatus(
+            timeframe=timeframe,
+            label=occ_labels.get(timeframe, ""),
+            weight=1,
+            is_green=is_green,
+            just_crossed=just_crossed,
+            close_ma=c_now,
+            open_ma=o_now,
+            strength=strength
+        )
 
 
-# ==================== ESKİ SİSTEM UYUMLULUĞU ====================
-# Eski kodun beklediği TechnicalAnalyzer sınıfı
+
+# ==================== GERİYE UYUMLULUK WRAPPER ====================
+# Eski MultiTfOccAnalyzer ve TechnicalAnalyzer referanslarının hata vermemesi için uyumluluk katmanı
+
+class MultiTfOccAnalyzer:
+    """Wrapper that routes analyze calls to SpotPipelineAnalyzer."""
+    def __init__(self):
+        self.spa = SpotPipelineAnalyzer()
+
+    def analyze_multi_tf(self, symbol: str, tf_data: dict):
+        # Bu metod eski OCC analizini simüle eder. Yeni Pipeline scanner.py içinde çalışacak.
+        return None
+
 
 class TechnicalAnalyzer:
-    """Geriye uyumluluk wrapper — yeni MultiTfOccAnalyzer'ı kullanır."""
-
+    """Geriye uyumluluk wrapper."""
     def __init__(self, criteria: dict = None, min_strength_pct: float = None):
-        self.multi_tf = MultiTfOccAnalyzer()
+        self.spa = SpotPipelineAnalyzer()
 
     def analyze(self, symbol, df, htf_df=None, btc_df=None):
-        # Eski single-TF analiz — artık kullanılmıyor
         return None
 
     def check_exit_signal(self, symbol, df):

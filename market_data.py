@@ -135,34 +135,80 @@ class MarketData:
 
     def get_all_pairs(self) -> dict:
         """
-        Aktif Spot çiftlerini getirir.
+        Binance.TR Spot üzerindeki aktif TRY çiftlerini getirir.
         """
         if PAIR_MODE == "manual":
             return {"USDT": MANUAL_USDT_PAIRS, "TRY": []}
 
+        # 1. Binance.TR Open API üzerinden dene
         try:
-            data = self._send_public_request("/api/v3/exchangeInfo", timeout=15)
-            if not data:
-                return {"USDT": MANUAL_USDT_PAIRS, "TRY": []}
+            resp = self.session.get("https://www.binance.tr/open/v1/common/symbols", timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                symbols_list = data.get("data", {}).get("list", [])
+
+                discovered_pairs = []
+                for s in symbols_list:
+                    sym = s.get("symbol", "")
+                    if sym.endswith(f"_{QUOTE_ASSET}"):
+                        base_asset = sym.replace(f"_{QUOTE_ASSET}", "")
+                        if base_asset not in STABLECOIN_BASES:
+                            clean_sym = sym.replace("_", "")
+                            discovered_pairs.append(clean_sym)
+
+                if discovered_pairs:
+                    logger.info(
+                        f"Binance.TR üzerinden keşfedilen aktif {QUOTE_ASSET} Spot çifti sayısı: {len(discovered_pairs)}"
+                    )
+                    res = {}
+                    res["USDT"] = sorted(discovered_pairs) if QUOTE_ASSET == "USDT" else []
+                    res["TRY"] = sorted(discovered_pairs) if QUOTE_ASSET == "TRY" else []
+                    res[QUOTE_ASSET] = sorted(discovered_pairs)
+                    return res
+        except Exception as e:
+            logger.warning(f"Binance.TR Open API parite keşif hatası (Global API fallback kullanılacak): {e}")
+
+        # 2. Küresel Binance API Fallback'i (www.binance.tr kapalı veya yavaş ise)
+        try:
+            logger.info(f"Küresel Binance API üzerinden aktif {QUOTE_ASSET} çiftleri sorgulanıyor...")
+            resp = self.session.get("https://api.binance.me/api/v3/exchangeInfo", timeout=15)
+            data = resp.json()
+            symbols_list = data.get("symbols", [])
 
             discovered_pairs = []
-            for s in data.get("symbols", []):
-                base_asset = s.get("baseAsset", "").upper()
-                if (
-                    s.get("status") == "TRADING"
-                    and s.get("quoteAsset") == QUOTE_ASSET
-                    and base_asset not in STABLECOIN_BASES
-                ):
-                    discovered_pairs.append(s["symbol"])
+            for s in symbols_list:
+                sym = s.get("symbol", "")
+                status = s.get("status", "")
+                quote_asset = s.get("quoteAsset", "")
+                base_asset = s.get("baseAsset", "")
+                
+                if quote_asset == QUOTE_ASSET and status == "TRADING":
+                    if base_asset not in STABLECOIN_BASES:
+                        discovered_pairs.append(sym)
 
-            logger.info(
-                f"Keşfedilen Aktif {QUOTE_ASSET} Spot çifti sayısı: {len(discovered_pairs)}"
-            )
-            return {"USDT": sorted(discovered_pairs), QUOTE_ASSET: sorted(discovered_pairs), "TRY": []}
+            if discovered_pairs:
+                logger.info(
+                    f"Küresel API üzerinden keşfedilen aktif {QUOTE_ASSET} Spot çifti sayısı: {len(discovered_pairs)}"
+                )
+                res = {}
+                res["USDT"] = sorted(discovered_pairs) if QUOTE_ASSET == "USDT" else []
+                res["TRY"] = sorted(discovered_pairs) if QUOTE_ASSET == "TRY" else []
+                res[QUOTE_ASSET] = sorted(discovered_pairs)
+                return res
+        except Exception as fallback_err:
+            logger.error(f"Küresel API parite keşif hatası: {fallback_err}")
 
-        except Exception as e:
-            logger.error(f"Spot parite keşif hatası: {e}")
-            return {"USDT": MANUAL_USDT_PAIRS, "TRY": []}
+        # 3. Son Çare (Hardcoded Fallback)
+        logger.warning("Parite keşfi tamamen başarısız oldu! Statik TRY listesi kullanılıyor.")
+        static_try_pairs = [
+            "BTCTRY", "ETHTRY", "BNBTRY", "SOLTRY", "XRPTRY", "DOGETRY", "ADATRY", "AVAXTRY", 
+            "DOTTRY", "LINKTRY", "NEARTRY", "MATICTRY", "SHIBTRY", "LTCTRY", "TRXTRY", "APTTRY"
+        ]
+        res = {}
+        res["USDT"] = MANUAL_USDT_PAIRS
+        res["TRY"] = static_try_pairs
+        res[QUOTE_ASSET] = static_try_pairs
+        return res
 
     def filter_by_volume(self, pairs: list) -> list:
         """Minimum 24s hacim filtresini uygular."""
@@ -192,6 +238,64 @@ class MarketData:
 
         except Exception as e:
             logger.error(f"Spot hacim filtresi hatası: {e}")
+            return pairs
+
+    def filter_by_performance(self, pairs: list) -> list:
+        """
+        En iyi performans gösteren 30 ve en kötü performans gösteren 30 pariteyi seçer.
+        Toplamda en aktif 60 pariteyi döndürür.
+        """
+        if not pairs:
+            return []
+
+        try:
+            tickers_list = self._send_public_request("/api/v3/ticker/24hr", timeout=15)
+            if not tickers_list:
+                return pairs
+
+            tickers = {t["symbol"]: t for t in tickers_list}
+
+            pair_stats = []
+            for symbol in pairs:
+                clean_sym = symbol.replace("_", "")
+                ticker = tickers.get(clean_sym)
+                if not ticker:
+                    continue
+
+                pct_change = float(ticker.get("priceChangePercent", 0.0))
+                pair_stats.append((symbol, pct_change))
+
+            if not pair_stats:
+                return pairs
+
+            # Yüzde değişime göre küçükten büyüğe sıralayalım (en kötüden en iyiye)
+            pair_stats.sort(key=lambda x: x[1])
+
+            # En kötü 30 coin (yüzdelik düşüşü en fazla olanlar)
+            worst_30 = pair_stats[:30]
+            # En iyi 30 coin (yüzdelik yükselişi en fazla olanlar)
+            best_30 = pair_stats[-30:]
+
+            selected_pairs = [p[0] for p in worst_30] + [p[0] for p in best_30]
+            
+            # Tekilleştirelim (eğer çakışma varsa)
+            selected_pairs = list(set(selected_pairs))
+
+            logger.info(
+                f"📊 Performans Filtresi: Toplam {len(pairs)} pariteden "
+                f"en iyi 30 ve en kötü 30 seçildi. Aktif taranacak parite: {len(selected_pairs)}"
+            )
+            logger.info(
+                f"  • En Kötü Değişim: {pair_stats[0][0]} ({pair_stats[0][1]:+.2f}%) ile {pair_stats[29][0]} ({pair_stats[29][1]:+.2f}%) arası"
+            )
+            logger.info(
+                f"  • En İyi Değişim: {pair_stats[-30][0]} ({pair_stats[-30][1]:+.2f}%) ile {pair_stats[-1][0]} ({pair_stats[-1][1]:+.2f}%) arası"
+            )
+
+            return sorted(selected_pairs)
+
+        except Exception as e:
+            logger.error(f"Performans filtresi hatası: {e}")
             return pairs
 
     # ==================== SPOT MUM VERİSİ (OHLCV) ====================
@@ -272,6 +376,21 @@ class MarketData:
             if balances:
                 for a in balances:
                     if a.get("asset") == asset:
+                        return float(a.get("free", 0.0))
+        return 0.0
+
+    def get_asset_balance(self, asset: str) -> float:
+        """
+        Belirli bir coin'in (ör. MEME, BNB, NEAR) Binance.TR cüzdanındaki
+        kullanılabilir bakiyesini döner.
+        """
+        data = self._send_signed_request("GET", "/open/v1/account/spot")
+        if data:
+            inner_data = data.get("data") if isinstance(data.get("data"), dict) else data
+            balances = (inner_data.get("accountAssets") or inner_data.get("balances")) if isinstance(inner_data, dict) else None
+            if balances:
+                for a in balances:
+                    if a.get("asset") == asset.upper():
                         return float(a.get("free", 0.0))
         return 0.0
 

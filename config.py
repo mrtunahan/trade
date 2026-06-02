@@ -1,16 +1,6 @@
 # ============================================================================
-# config.py - Hiyerarşik Multi-TF OCC Scanner Yapılandırması
+# config.py - New Spot Pipeline Configuration (4-Stage Trend/Reversal)
 # ============================================================================
-# Strateji: 5 timeframe'de OCC durumu kontrol edilir, ağırlıklı puanlama
-# yapılır. 15dk OCC tetikleyici, üst TF'ler yön belirler.
-#
-# Haftalık(3p) + Günlük(2p) + 4H(2p) + 1H(1p) = 8p maks
-# 15dk = tetikleyici (puan değil, giriş kapısı)
-# Eşik: ≥5 puan + 15dk yeşil → ALIM sinyali
-#
-# Filtreler: RSI (giriş kalitesi), ADX (trend gücü)
-# ============================================================================
-
 import os
 from dotenv import load_dotenv
 
@@ -19,17 +9,18 @@ load_dotenv()
 # ==================== TELEGRAM ====================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+SEND_CHART_IMAGE   = True
+DAILY_SUMMARY_HOUR = 21
 
 # ==================== Binance TR Spot API ====================
 BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
-BINANCE_BASE_URL   = "https://www.binance.tr"  # Binance.TR Spot
+BINANCE_BASE_URL   = "https://www.binance.tr"
 
 # ==================== TARAMA AYARLARI ====================
-SCAN_INTERVAL = 300      # Her 5 dakikada bir tara
-KLINE_INTERVAL = "5m"    # Tetikleyici timeframe (5dk)
-
-KLINE_LIMIT = 250
+SCAN_INTERVAL  = 300      # 5 dakikada bir tara
+KLINE_INTERVAL = "5m"     # Tetikleyici timeframe (5m)
+KLINE_LIMIT    = 250
 
 # ==================== PARİTE AYARLARI ====================
 QUOTE_ASSET = os.getenv("QUOTE_ASSET", "TRY").upper()
@@ -38,189 +29,39 @@ ONLY_USDT = QUOTE_ASSET == "USDT"
 
 MANUAL_USDT_PAIRS = [
     f"BTC{QUOTE_ASSET}", f"ETH{QUOTE_ASSET}", f"BNB{QUOTE_ASSET}", f"SOL{QUOTE_ASSET}", f"XRP{QUOTE_ASSET}",
-    f"DOGE{QUOTE_ASSET}", f"ADA{QUOTE_ASSET}", f"AVAX{QUOTE_ASSET}", f"DOT{QUOTE_ASSET}", f"LINK{QUOTE_ASSET}",
 ]
 
-# Minimum 24s işlem hacmi filtresi (quoteAsset cinsinden)
-MIN_VOLUME_USDT = 0  # Devre dışı — tüm pariteler taranır
+MIN_VOLUME_USDT = 0  # Hacim filtresi devre dışı
 
-# ==================== HİYERARŞİK OCC PUANLAMA ====================
-# Her timeframe'de OCC durumu (yeşil/kırmızı) kontrol edilir.
-# Yeşil = Close MA > Open MA (yükseliş)
-# Kırmızı = Close MA < Open MA (düşüş)
-#
-# Üst TF her zaman alt TF'yi yönetir:
-#   Haftalık → yön belirler
-#   Günlük  → giriş penceresi açar
-#   4H      → zamanlama
-#   1H      → zamanlama
-#   15dk    → tetikleyici (yeşil yakınca giriş)
-
-OCC_TIMEFRAMES = {
-    # timeframe: (ağırlık, kline_limit, açıklama)
-    "1d":  (3, 100, "Günlük"),      # 3 puan — yön belirler
-    "4h":  (2, 200, "4 Saatlik"),   # 2 puan — giriş penceresi
-    "1h":  (2, 250, "1 Saatlik"),   # 2 puan — zamanlama
-    "15m": (1, 250, "15 Dakika"),   # 1 puan — zamanlama
-    "5m":  (0, 250, "5 Dakika"),    # 0 puan — sadece tetikleyici
-}
-
-# Toplam maks puan: 3+2+2+1 = 8
-# Minimum eşik: 5 puan (üst TF'lerin çoğunluğu yeşil olmalı)
-OCC_MIN_SCORE = 5
-
-# ==================== SİNYAL FİLTRE KURALLARI ====================
-# Desen bazlı dinamik eşik sistemi:
-# Her desen kendi ADX/RSI eşiklerine sahiptir.
-#
-# Kural 1: Tanımlı desenlere eşleşen coinler → desen bazlı ADX/RSI filtresi
-# Kural 2: Full Sniper (puan >= 7) → kendi ADX/RSI eşikleri
-# Kural 3: Puan >= 6 + üst TF koruması (1w veya 1d yeşil) → genel eşikler
-#
-# Yıldızlama sistemi: Sinyaller engellenmez, kalite etiketiyle gönderilir.
-#   ⭐     (5p)   → Fırsat (düşük güven)
-#   ⭐⭐   (6p)   → Sinyal (orta güven)
-#   ⭐⭐⭐ (7-8p) → Full Sniper (yüksek güven)
-
-SIGNAL_FILTER = {
+# ==================== SPOT PIPELINE HIZLI YAPILANDIRMASI ====================
+SPOT_PIPELINE = {
     "enabled": True,
-
-    # ---- Desen bazlı kurallar ----
-    # Her desen kendi min_adx ve min_rsi eşiğine sahip.
-    "allowed_patterns": [
-        {
-            "name": "Dip Avcısı",
-            "description": "Derin düzeltme sonrası dönüş",
-            "pattern": {"1d": True, "4h": True, "1h": False, "15m": False, "5m": True},
-            "min_adx": 20,       # Düzeltmede ADX düşük olabilir
-            "max_adx": 50,       # ADX > 50 ise hareket bitmiş olabilir
-            "min_rsi": 35,       # Dip bölgesinde RSI düşük olur
-        },
-        {
-            "name": "Trend Takipçi",
-            "description": "4H ve 1H da yeşil, trend devamı",
-            "pattern": {"1d": True, "4h": True, "1h": True, "15m": False, "5m": True},
-            "min_adx": 25,       # Güçlü trend gerekli
-            "min_rsi": 50,       # Momentum devam etmeli
-        },
-        {
-            "name": "Trend Takipçi v2",
-            "description": "1H yeşil, 4H kırmızı ama üst TF'ler güçlü",
-            "pattern": {"1d": True, "4h": True, "1h": False, "15m": True, "5m": True},
-            "min_adx": 22,
-            "min_rsi": 42,
-        },
-        {
-            "name": "Güçlü Momentum",
-            "description": "4H ve 1H ikisi de yeşil, güçlü yükseliş",
-            "pattern": {"1d": True, "4h": True, "1h": True, "15m": True, "5m": True},
-            "min_adx": 22,
-            "min_rsi": 45,
-        },
-    ],
-
-    # ---- Full Sniper (puan >= 7) ----
-    "allow_full_sniper": True,
-    "full_sniper_min_score": 7,
-    "full_sniper_min_adx": 22,   # Full Sniper zaten güçlü, ADX esnetilebilir
-    "full_sniper_min_rsi": 45,
-
-    # ---- Puan bazlı geçiş (desen eşleşmese bile) ----
-    # Puan >= 6 ve 1w veya 1d'den en az biri yeşilse geçiş izni
-    "score_fallback": {
-        "enabled": True,
-        "min_score": 6,
-        "require_upper_tf": True,   # 1d veya 4h'den biri yeşil olmalı
-        "min_adx": 22,
-        "min_rsi": 45,
+    # Relative Strength Puanlama Ağırlıkları
+    "rs_weights": {
+        "30d": 0.4,
+        "7d": 0.3,
+        "24h": 0.3
     },
-
-    # ---- Yıldız bazlı kalite sistemi ----
-    # Tüm geçerli sinyaller gönderilir, puana göre etiketlenir.
-    "star_rating": {
-        "enabled": True,
-        "tiers": [
-            # (min_score, yıldız, etiket, pozisyon_önerisi) — kullanılabilir bakiyenin %'si
-            {"min_score": 8, "stars": "⭐⭐⭐", "label": "Full Sniper",    "position_pct": 24},
-            {"min_score": 7, "stars": "⭐⭐⭐", "label": "Full Sniper",    "position_pct": 24},
-            {"min_score": 6, "stars": "⭐⭐",   "label": "Güçlü Sinyal",   "position_pct": 35},
-            {"min_score": 5, "stars": "⭐",     "label": "Fırsat",         "position_pct": 44},
-        ],
+    # Güçlü 30 segment (Trend Takipçiliği)
+    "strong": {
+        "score_threshold": 6,
+        "rsi_min": 55,
+        "rsi_max": 70,
+        "vol_multiplier": 1.5,
+        "base_sl_pct": 3.0,
+        "base_tp_pct": 6.0
     },
+    # Güçsüz 30 segment (Dipten Dönüş/Tepki)
+    "weak": {
+        "score_threshold": 5,
+        "rsi_max": 45,        # Aşırı satım veya dipten yukarı dönüş sınırı
+        "vol_multiplier": 2.0,
+        "base_sl_pct": 2.5,
+        "base_tp_pct": 5.0
+    }
 }
 
-# OCC hesaplama parametreleri (tüm TF'ler için aynı)
-OCC_PERIOD = 8           # Pine Script varsayılanı: 8 (basisLen)
-OCC_MA_TYPE = "SMMA"     # Pine Script varsayılanı: SMMA (Smoothed MA)
-OCC_MIN_STRENGTH = 5.0   # Pine Script pcd skalası (50000*diff/avg)
-
-# ==================== RSI FİLTRESİ ====================
-# RSI giriş kalitesini artırmak için kullanılır.
-# OCC yeşil yaktığında RSI 30-50 arası → iyi giriş (momentum başlıyor)
-# RSI 70+ → dikkat (hareket zaten olmuş)
-RSI_CONFIG = {
-    "enabled": True,
-    "period": 14,
-    "ideal_entry_min": 30,     # RSI bu aralıktaysa giriş kalitesi yüksek
-    "ideal_entry_max": 50,
-    "caution_level": 70,       # RSI bunun üstündeyse dikkat uyarısı
-    "block_level": 80,         # RSI bunun üstündeyse sinyal engelle
-}
-
-# ==================== ADX FİLTRESİ ====================
-# Trend gücünü ölçer, OCC sinyallerini filtreler.
-# ADX > 25 → trend var, OCC sinyali daha güvenilir
-# ADX < 20 → yatay piyasa, sahte sinyal riski yüksek
-ADX_CONFIG = {
-    "enabled": True,
-    "period": 14,
-    "strong_trend": 25,    # ADX bunun üstünde → trend güçlü
-    "weak_market": 15,     # ADX bunun altında → uyarı (isteğe bağlı blok)
-    "block_below": 0,      # 0 = engelleme yok, >0 ise bu ADX altında sinyal engelle
-}
-
-# ==================== DİNAMİK STOP-LOSS ====================
-DYNAMIC_STOP_LOSS = {
-    "enabled": True,
-    "base_sl_pct": 3.0,
-    "base_tp_pct": 6.0,
-    "strong_trend_adx": 40,
-    "ranging_adx": 20,
-    "trend_sl_pct": 4.0,
-    "trend_tp_pct": 10.0,
-    "range_sl_pct": 2.0,
-    "range_tp_pct": 4.0,
-    "trailing_stop": {
-        "enabled": True,
-        "atr_multiplier": 2.5,
-        "activation_pct": 2.0,
-    },
-}
-
-# ==================== BİLDİRİM AYARLARI ====================
-# Her OCC renk değişiminde bildirim gönderilir
-ALERT_COOLDOWN_MINUTES = 30   # Aynı sembol+TF için cooldown
-SEND_CHART_IMAGE = True
-DAILY_SUMMARY_HOUR = 21
-NOTIFY_ALL_TF_CHANGES = False  # Kapalı: yüzlerce renk değişimi spam yapıyordu
-
-# ==================== HACİM (VOLUME) FİLTRESİ ====================
-VOLUME_FILTER = {
-    "enabled": False,            # Devre dışı — hacim filtresi kaldırıldı
-    "lookback_bars": 20,
-    "multiplier": 1.0,
-}
-
-# ==================== HACİM SPIKE ALGILAMA ====================
-VOLUME_SPIKE = {
-    "enabled": False,           # Aktif etmek için True yapın
-    "lookback_bars": 20,        # Ortalama hesaplama için önceki bar sayısı
-    "multiplier": 5.0,          # Mevcut hacim / ortalama hacim > bu değer ise spike
-    "min_volume_usdt": 50_000,  # Spike bildirimi için minimum hacim (USDT)
-    "cooldown_minutes": 60,     # Aynı sembol için spike cooldown süresi
-}
-
-# Sinyal üretilmemesi gereken stablecoin ve benzeri çiftler (Spot)
+# Stablecoin ve yasaklı pariteler
 STABLECOIN_BASES = {
     "USDT", "USDC", "FDUSD", "TUSD", "BUSD", "DAI", 
     "USDP", "EUR", "GBP", "TRY", "USDE", "PYUSD", 
@@ -240,53 +81,3 @@ STABLECOIN_BLACKLIST = {
 # ==================== LOGLAMA ====================
 LOG_FILE  = "scanner.log"
 LOG_LEVEL = "INFO"
-
-# ==================== ESKİ SİSTEM UYUMLULUĞU ====================
-# analyzer.py'nin ihtiyaç duyduğu eski değişkenler
-MAX_HOLD_BARS = 168
-MIN_SIGNAL_STRENGTH_PCT = 0.60
-MIN_CRITERIA_MET = 3
-POSITION_SIZING = {"enabled": False, "tiers": []}
-CRITERIA = {
-    "occ": {"enabled": True, "period": OCC_PERIOD, "ma_type": OCC_MA_TYPE,
-            "min_strength": OCC_MIN_STRENGTH, "weight": 2, "required": False},
-    "market_regime": {"enabled": True, "adx_period": ADX_CONFIG["period"],
-                      "trend_threshold": ADX_CONFIG["strong_trend"],
-                      "range_threshold": ADX_CONFIG["weak_market"], "weight": 0},
-    "exit_strategy": {"enabled": True, "occ_reverse_weight": 2,
-                      "rsi_overbought_weight": 1, "volume_drop_weight": 1,
-                      "stoch_overbought_weight": 1, "min_exit_score": 3},
-    "ema_cross": {"enabled": False},
-    "rsi": {"enabled": False},
-    "macd": {"enabled": False},
-    "bollinger": {"enabled": False},
-    "volume_spike": {"enabled": False},
-    "trend_filter": {"enabled": False},
-    "stoch_rsi": {"enabled": False},
-    "support_resistance": {"enabled": False},
-    "multi_timeframe": {"enabled": False},
-    "time_filter": {"enabled": False},
-    "btc_filter": {"enabled": False},
-    "confluence_window": {"enabled": False},
-    "candle_cooldown": {"enabled": False},
-}
-
-# ==================== DOĞRULAMA ====================
-def validate_config():
-    import logging as _log
-    _logger = _log.getLogger("Config")
-
-    total_weight = sum(w for tf, (w, _, _) in OCC_TIMEFRAMES.items() if tf != "15m")
-    _logger.info(f"Hiyerarşik OCC: {len(OCC_TIMEFRAMES)} TF, "
-                 f"Maks puan: {total_weight}, Eşik: {OCC_MIN_SCORE}")
-    _logger.info(f"RSI filtre: {'Aktif' if RSI_CONFIG['enabled'] else 'Kapalı'}, "
-                 f"ADX filtre: {'Aktif' if ADX_CONFIG['enabled'] else 'Kapalı'}")
-    _logger.info(f"Pariteler: Binance.TR Spot {QUOTE_ASSET} | Min hacim: {MIN_VOLUME_USDT:,} {QUOTE_ASSET}")
-
-    if not TELEGRAM_BOT_TOKEN:
-        _logger.warning("TELEGRAM_BOT_TOKEN ayarlanmamış!")
-    if not TELEGRAM_CHAT_ID:
-        _logger.warning("TELEGRAM_CHAT_ID ayarlanmamış!")
-
-
-validate_config()

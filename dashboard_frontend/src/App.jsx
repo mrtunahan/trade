@@ -3,12 +3,13 @@
 // ============================================================================
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { io } from 'socket.io-client';
-import { AreaChart, Area, ResponsiveContainer, Tooltip as ReTooltip, XAxis } from 'recharts';
+import { AreaChart, Area, ResponsiveContainer, Tooltip as ReTooltip, XAxis, YAxis, CartesianGrid } from 'recharts';
 import {
   Terminal, Activity, Briefcase, History, TrendingUp, Wifi, WifiOff,
   Zap, DollarSign, BarChart2, BookOpen, RefreshCw, ChevronDown,
   Globe, Search, ArrowUp, ArrowDown, Volume2, VolumeX, AlertTriangle,
-  Play, ArrowRightLeft, Shield, Sliders, Info, Percent, Eye, Wallet, Coins
+  Play, ArrowRightLeft, Shield, Sliders, Info, Percent, Eye, Wallet, Coins,
+  Power, XCircle, Square, Loader2
 } from 'lucide-react';
 
 const API_URL = 'http://localhost:5001';
@@ -84,12 +85,12 @@ function SectionHeader({ icon: Icon, title, children }) {
 }
 function StatCard({ icon: Icon, label, value, sub, color = 'text-cyan-400' }) {
   return (
-    <div className="bg-gray-900 border border-cyan-900 rounded-lg p-3 flex flex-col gap-1">
-      <div className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-widest">
-        <Icon size={12} />{label}
+    <div className="bg-slate-800/90 border border-slate-700/80 rounded-xl p-4 flex flex-col gap-1.5 shadow-lg hover:shadow-cyan-500/5 transition-all duration-300">
+      <div className="flex items-center gap-1.5 text-[10px] text-slate-300 font-bold uppercase tracking-wider">
+        <Icon size={12} className="text-cyan-400" />{label}
       </div>
-      <div className={`text-2xl font-bold font-mono ${color}`}>{value}</div>
-      {sub && <div className="text-[10px] text-gray-500">{sub}</div>}
+      <div className={`text-2xl font-extrabold font-mono ${color}`}>{value}</div>
+      {sub && <div className="text-[10px] text-slate-300 font-semibold">{sub}</div>}
     </div>
   );
 }
@@ -103,7 +104,8 @@ function TradingViewChart({ symbol, interval }) {
 
   // Sembol veya interval değiştiğinde
   useEffect(() => {
-    const tvSymbol   = `BINANCE:${symbol}`;
+    const cleanedSymbol = String(symbol || 'BTCTRY').replace('_', '');
+    const tvSymbol   = `BINANCE:${cleanedSymbol}`;
     const tvInterval = TV_INTERVAL_MAP[interval] || '15';
 
     if (widgetRef.current) {
@@ -336,24 +338,24 @@ function SignalCard({ sig, onSelect, onExecute, onOpenDetails }) {
   // Full Sniper (Tüm zaman dilimleri yeşil) tespiti ve özel ışıma efekti
   const isFullSniper = Array.isArray(sig.tf_statuses) && sig.tf_statuses.length > 0 && sig.tf_statuses.every(t => t.is_green);
   
-  let cardClass = "border-cyan-950/60 bg-gray-900/80 hover:border-cyan-500/80 hover:shadow-[0_0_15px_rgba(6,182,212,0.15)]";
+  let cardClass = "border-slate-700/80 bg-slate-800/90 hover:border-cyan-500/80 hover:bg-slate-800/95 hover:shadow-[0_0_20px_rgba(6,182,212,0.2)]";
   let badgeStarsColor = "text-yellow-400";
   
   if (isFullSniper) {
-    cardClass = "border-amber-500/80 bg-gray-900/90 shadow-[0_0_20px_rgba(245,158,11,0.2)] hover:border-amber-400 hover:shadow-[0_0_25px_rgba(245,158,11,0.3)] border-2";
+    cardClass = "border-amber-500 bg-slate-800 shadow-[0_0_20px_rgba(245,158,11,0.25)] hover:border-amber-400 border-2";
     badgeStarsColor = "text-amber-300";
   } else if (sig.stars === "⭐⭐⭐") {
-    cardClass = "border-emerald-500/80 bg-gray-900/80 shadow-[0_0_15px_rgba(16,185,129,0.15)] hover:border-emerald-400 hover:shadow-[0_0_20px_rgba(16,185,129,0.25)]";
+    cardClass = "border-emerald-500 bg-slate-800 shadow-[0_0_15px_rgba(16,185,129,0.2)] hover:border-emerald-400 hover:shadow-[0_0_20px_rgba(16,185,129,0.3)] border";
   } else if (sig.stars === "⭐⭐") {
-    cardClass = "border-cyan-500/80 bg-gray-900/80 shadow-[0_0_15px_rgba(6,182,212,0.1)] hover:border-cyan-400 hover:shadow-[0_0_20px_rgba(6,182,212,0.2)]";
+    cardClass = "border-cyan-500 bg-slate-800 shadow-[0_0_15px_rgba(6,182,212,0.15)] hover:border-cyan-400 hover:shadow-[0_0_20px_rgba(6,182,212,0.25)] border";
   }
 
   // RSI status and colors
-  const rsiColor = sig.rsi_quality === 'ideal' ? 'text-green-400' : sig.rsi_quality === 'caution' ? 'text-red-400' : 'text-yellow-400';
+  const rsiColor = sig.rsi_quality === 'ideal' ? 'text-green-400 font-extrabold' : sig.rsi_quality === 'caution' ? 'text-red-400 font-extrabold' : 'text-yellow-400 font-extrabold';
   const rsiDot = sig.rsi_quality === 'ideal' ? 'bg-green-500' : sig.rsi_quality === 'caution' ? 'bg-red-500' : 'bg-yellow-500';
 
   // ADX status and colors
-  const adxColor = sig.adx_regime === 'trending' ? 'text-green-400' : sig.adx_regime === 'ranging' ? 'text-yellow-400' : 'text-gray-400';
+  const adxColor = sig.adx_regime === 'trending' ? 'text-green-400 font-extrabold' : sig.adx_regime === 'ranging' ? 'text-yellow-400 font-extrabold' : 'text-slate-300 font-extrabold';
   const adxDot = sig.adx_regime === 'trending' ? 'bg-green-500' : 'bg-yellow-500';
 
   return (
@@ -369,32 +371,54 @@ function SignalCard({ sig, onSelect, onExecute, onOpenDetails }) {
               <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${isFullSniper ? 'bg-amber-400' : 'bg-cyan-400'}`}></span>
               <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${isFullSniper ? 'bg-amber-500' : 'bg-cyan-500'}`}></span>
             </span>
-            <span className="text-base font-bold text-white tracking-wide">
+            <span className="text-lg font-extrabold text-white tracking-wide">
               {base}<span className="text-cyan-400 font-semibold">/{quote}</span>
             </span>
           </div>
-          <div className="text-[10px] text-gray-500 font-medium font-mono">{ts}</div>
+          <div className="text-[10px] text-slate-300 font-bold font-mono">{ts}</div>
         </div>
 
         <div className="flex flex-col items-end gap-1">
           <div className="flex items-center gap-1.5">
             <Badge label={sig.status} color={statusColor} />
-            <span className={`text-xs font-bold font-mono tracking-wider ${badgeStarsColor}`}>
+            <span className={`text-sm font-extrabold font-mono tracking-wider ${badgeStarsColor}`}>
               {sig.stars || '⭐'}
             </span>
           </div>
-          <span className="text-[9px] font-bold text-cyan-400 uppercase tracking-widest text-right mt-0.5">
+          <span className="text-[10px] font-extrabold text-cyan-300 uppercase tracking-widest text-right mt-0.5">
             {sig.star_label || sig.matched_pattern || 'GİRİŞ FIRSATI'}
           </span>
         </div>
       </div>
 
+      {/* Market Regime & Relative Strength Badges */}
+      {(sig.segment_type || sig.rs_score !== undefined) && (
+        <div className="flex gap-2 flex-wrap items-center">
+          {sig.segment_type === "STRONG" ? (
+            <div className="bg-emerald-500/10 border border-emerald-500/40 rounded px-2 py-0.5 text-[9px] font-extrabold text-emerald-400 uppercase tracking-wide flex items-center gap-1 shadow-sm">
+              🔥 BOĞA (TREND)
+            </div>
+          ) : sig.segment_type === "WEAK" ? (
+            <div className="bg-indigo-500/10 border border-indigo-500/40 rounded px-2 py-0.5 text-[9px] font-extrabold text-indigo-400 uppercase tracking-wide flex items-center gap-1 shadow-sm">
+              ❄️ TEPKİ (DİP)
+            </div>
+          ) : null}
+          {sig.rs_score !== undefined && (
+            <div className="bg-slate-700/60 border border-slate-600/50 rounded px-2 py-0.5 text-[9px] font-bold text-slate-200 tracking-wider">
+              RS: <span className={sig.rs_score >= 0 ? "text-emerald-400 font-extrabold" : "text-red-400 font-extrabold"}>
+                {sig.rs_score >= 0 ? '+' : ''}{(sig.rs_score * 100).toFixed(1)}%
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Sinyal Kalitesi & Mum Formasyonu Özel Rozeti */}
-      <div className="flex flex-wrap gap-1.5 items-center justify-between border-t border-cyan-950/40 pt-2 pb-1">
+      <div className="flex flex-wrap gap-1.5 items-center justify-between border-t border-slate-700/40 pt-2 pb-1">
         <div className="flex items-center gap-1">
-          <span className="text-[10px] text-gray-400">Güven Puanı:</span>
+          <span className="text-[10px] text-slate-300 font-bold">Güven Puanı:</span>
           <span className="text-cyan-300 font-extrabold font-mono text-xs">{sig.total_score}/{sig.max_score}p</span>
-          <div className="h-1.5 w-14 bg-gray-800/80 rounded-full overflow-hidden ml-1 border border-cyan-950/30">
+          <div className="h-1.5 w-14 bg-slate-900 rounded-full overflow-hidden ml-1 border border-slate-700/40">
             <div 
               className={`h-full rounded-full ${isFullSniper ? 'bg-amber-500' : 'bg-cyan-500'}`} 
               style={{width:`${Math.round((sig.total_score/sig.max_score)*100)}%`}} 
@@ -402,10 +426,10 @@ function SignalCard({ sig, onSelect, onExecute, onOpenDetails }) {
           </div>
         </div>
 
-        {/* Dynamic Pattern / Sniper Badge */}
+        {/* Dynamic Pattern / Trigger Badge */}
         {sig.candlestick_pattern ? (
-          <div className="bg-amber-955/40 border border-amber-800/60 rounded px-2 py-0.5 text-[9px] font-bold text-amber-400 flex items-center gap-1 shadow-sm">
-            ✨ {sig.candlestick_pattern}
+          <div className="bg-amber-500/10 border border-amber-500/40 rounded px-2 py-0.5 text-[9px] font-bold text-amber-300 flex items-center gap-1 shadow-sm max-w-full">
+            ⚡ TETİK ({sig.trigger_tf || 'N/A'}): <span className="text-white font-extrabold">{sig.candlestick_pattern}</span>
           </div>
         ) : isFullSniper ? (
           <div className="bg-amber-500 border border-amber-400 text-gray-950 rounded px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-widest flex items-center gap-0.5 shadow-sm shadow-amber-500/20">
@@ -414,14 +438,35 @@ function SignalCard({ sig, onSelect, onExecute, onOpenDetails }) {
         ) : null}
       </div>
 
+      {/* Daily Pipeline Filters checklist */}
+      {sig.pipeline_filters && (
+        <div className="flex items-center gap-2 text-[9px] bg-slate-900/60 border border-slate-700/40 rounded px-2 py-1 select-none">
+          <span className="text-slate-400 font-bold uppercase tracking-wider">Günlük Filtreler:</span>
+          <span className="flex items-center gap-1">
+            <span className={sig.pipeline_filters.ema_ok ? "text-emerald-400 font-bold" : "text-red-400 font-bold"}>EMA</span>
+            <span>{sig.pipeline_filters.ema_ok ? "🟢" : "🔴"}</span>
+          </span>
+          <span className="text-slate-700">|</span>
+          <span className="flex items-center gap-1">
+            <span className={sig.pipeline_filters.rsi_ok ? "text-emerald-400 font-bold" : "text-red-400 font-bold"}>RSI</span>
+            <span>{sig.pipeline_filters.rsi_ok ? "🟢" : "🔴"}</span>
+          </span>
+          <span className="text-slate-700">|</span>
+          <span className="flex items-center gap-1">
+            <span className={sig.pipeline_filters.vol_ok ? "text-emerald-400 font-bold" : "text-red-400 font-bold"}>HACİM</span>
+            <span>{sig.pipeline_filters.vol_ok ? "🟢" : "🔴"}</span>
+          </span>
+        </div>
+      )}
+
       {/* Görsel Risk:Reward (R:R) İlerleme Cetveli */}
-      <div className="space-y-1 bg-gray-950/40 border border-cyan-950/20 rounded-lg p-2">
-        <div className="flex justify-between text-[9px] text-gray-400 font-semibold font-mono">
+      <div className="space-y-1 bg-slate-900/60 border border-slate-700/40 rounded-lg p-2">
+        <div className="flex justify-between text-[9px] text-slate-300 font-bold font-mono">
           <span className="text-red-400">SL (-{sig.stop_loss_pct.toFixed(1)}%)</span>
-          <span className="text-cyan-400">R:R 1:{rr}</span>
+          <span className="text-cyan-300">R:R 1:{rr}</span>
           <span className="text-green-400">Hedef (+{sig.take_profit_pct.toFixed(1)}%)</span>
         </div>
-        <div className="relative h-2 bg-gray-800 rounded-full border border-cyan-950/30 overflow-hidden flex">
+        <div className="relative h-2 bg-slate-950 rounded-full border border-slate-800 overflow-hidden flex">
           <div className="h-full bg-red-500/40 border-r border-red-500/70" style={{ width: '25%' }} />
           <div className="h-full bg-cyan-500/20" style={{ width: '35%' }} />
           <div className="h-full bg-green-500/40 border-l border-green-500/70" style={{ width: '40%' }} />
@@ -432,17 +477,17 @@ function SignalCard({ sig, onSelect, onExecute, onOpenDetails }) {
 
       {/* Sayısal Fiyat Değerleri Tablosu */}
       <div className="grid grid-cols-3 gap-2">
-        <div className="bg-cyan-950/20 border border-cyan-900/30 rounded-lg p-2 text-center hover:bg-cyan-950/30 transition-colors">
-          <div className="text-cyan-400 text-[9px] font-semibold uppercase tracking-wider">GİRİŞ</div>
+        <div className="bg-cyan-950/40 border border-cyan-800/40 rounded-lg p-2 text-center hover:bg-cyan-950/60 transition-colors">
+          <div className="text-cyan-300 text-[9px] font-extrabold uppercase tracking-wider">GİRİŞ</div>
           <div className="text-white font-extrabold font-mono text-sm mt-0.5">{fmt(sig.price)}</div>
         </div>
-        <div className="bg-red-950/20 border border-red-900/30 rounded-lg p-2 text-center hover:bg-red-950/30 transition-colors">
-          <div className="text-red-400 text-[9px] font-semibold uppercase tracking-wider">STOP-LOSS</div>
-          <div className="text-red-300 font-extrabold font-mono text-sm mt-0.5">{fmt(sl)}</div>
+        <div className="bg-red-950/40 border border-red-800/40 rounded-lg p-2 text-center hover:bg-red-950/60 transition-colors">
+          <div className="text-red-300 text-[9px] font-extrabold uppercase tracking-wider">STOP-LOSS</div>
+          <div className="text-red-200 font-extrabold font-mono text-sm mt-0.5">{fmt(sl)}</div>
         </div>
-        <div className="bg-green-950/20 border border-green-900/30 rounded-lg p-2 text-center hover:bg-green-950/30 transition-colors">
-          <div className="text-green-400 text-[9px] font-semibold uppercase tracking-wider">HEDEF (TP)</div>
-          <div className="text-green-300 font-extrabold font-mono text-sm mt-0.5">{fmt(tp)}</div>
+        <div className="bg-green-950/40 border border-green-800/40 rounded-lg p-2 text-center hover:bg-green-950/60 transition-colors">
+          <div className="text-green-300 text-[9px] font-extrabold uppercase tracking-wider">HEDEF (TP)</div>
+          <div className="text-green-200 font-extrabold font-mono text-sm mt-0.5">{fmt(tp)}</div>
         </div>
       </div>
 
@@ -450,7 +495,7 @@ function SignalCard({ sig, onSelect, onExecute, onOpenDetails }) {
       <TfHeatmap tfStatuses={sig.tf_statuses} />
 
       {/* Alt Göstergeler & Hızlı Aksiyon */}
-      <div className="flex gap-2.5 text-[10px] text-gray-400 border-t border-cyan-950/40 pt-2 items-center flex-wrap">
+      <div className="flex gap-2.5 text-[10px] text-slate-300 border-t border-slate-700/40 pt-2 items-center flex-wrap">
         <div className="flex items-center gap-1">
           <span className={`inline-block w-1.5 h-1.5 rounded-full ${rsiDot}`} />
           <span>RSI: <span className={`font-bold font-mono ${rsiColor}`}>{fmt(sig.rsi_value, 1)}</span></span>
@@ -482,27 +527,257 @@ function SignalCard({ sig, onSelect, onExecute, onOpenDetails }) {
   );
 }
 
+// ── Dairesel & Efektif Grafik Bileşenleri ──────────────────────────────────────
+function CircularProgress({ value, label, sub, color = "text-emerald-400", stroke = "#10b981", icon: Icon }) {
+  const radius = 36;
+  const circumference = 2 * Math.PI * radius;
+  const strokeDashoffset = circumference - (Math.min(Math.max(value, 0), 100) / 100) * circumference;
+  
+  return (
+    <div className="bg-slate-800/90 border border-slate-700/80 rounded-xl p-4 flex items-center justify-between gap-4 shadow-lg hover:shadow-cyan-500/10 transition-all duration-300">
+      <div className="space-y-1">
+        <div className="flex items-center gap-1.5 text-[10px] text-slate-300 font-bold uppercase tracking-wider">
+          <Icon size={12} className="text-cyan-400" />
+          <span>{label}</span>
+        </div>
+        <div className="text-2xl font-extrabold font-mono text-white mt-1">
+          {value.toFixed(1)} %
+        </div>
+        {sub && <div className="text-[10px] text-slate-300 font-semibold">{sub}</div>}
+      </div>
+      
+      <div className="relative flex items-center justify-center h-20 w-20 flex-shrink-0">
+        <svg className="w-full h-full transform -rotate-90">
+          <circle
+            cx="40"
+            cy="40"
+            r={radius}
+            className="stroke-slate-700/40"
+            strokeWidth="6"
+            fill="transparent"
+          />
+          <circle
+            cx="40"
+            cy="40"
+            r={radius}
+            stroke={stroke}
+            strokeWidth="6"
+            fill="transparent"
+            strokeDasharray={circumference}
+            strokeDashoffset={strokeDashoffset}
+            strokeLinecap="round"
+            className="transition-all duration-500 ease-out"
+            style={{ filter: `drop-shadow(0 0 6px ${stroke})` }}
+          />
+        </svg>
+        <span className={`absolute text-xs font-extrabold font-mono ${color}`}>
+          {Math.round(value)}%
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function ProfitFactorGauge({ value, label, sub, icon: Icon }) {
+  const displayVal = value === 99.9 ? '∞' : value.toFixed(2);
+  const percentage = Math.min(Math.max((value / 3.0) * 100, 0), 100);
+  
+  let color = "text-red-400";
+  let barColor = "bg-red-500";
+  
+  if (value >= 1.5) {
+    color = "text-emerald-400";
+    barColor = "bg-emerald-500";
+  } else if (value >= 1.0) {
+    color = "text-yellow-400";
+    barColor = "bg-yellow-500";
+  }
+  
+  return (
+    <div className="bg-slate-800/90 border border-slate-700/80 rounded-xl p-4 flex flex-col justify-between gap-3 shadow-lg hover:shadow-cyan-500/10 transition-all duration-300">
+      <div className="flex items-center gap-1.5 text-[10px] text-slate-300 font-bold uppercase tracking-wider">
+        <Icon size={12} className="text-cyan-400" />
+        <span>{label}</span>
+      </div>
+      
+      <div className="flex justify-between items-end">
+        <div className={`text-2xl font-extrabold font-mono leading-none ${color}`}>
+          {displayVal}
+        </div>
+        {sub && <div className="text-[10px] text-slate-300 font-semibold text-right">{sub}</div>}
+      </div>
+      
+      <div className="space-y-1 pt-1">
+        <div className="relative h-2 bg-slate-900 rounded-full overflow-hidden border border-slate-700/30">
+          <div className="absolute top-0 bottom-0 left-0 w-1/3 bg-red-500/20" />
+          <div className="absolute top-0 bottom-0 left-1/3 w-1/6 bg-yellow-500/20" />
+          <div className="absolute top-0 bottom-0 left-1/2 w-1/2 bg-emerald-500/20" />
+          
+          <div 
+            className={`h-full rounded-full ${barColor} shadow-md transition-all duration-500 ease-out`}
+            style={{ width: `${percentage}%` }}
+          />
+        </div>
+        
+        <div className="flex justify-between text-[8px] text-slate-400 font-semibold font-mono">
+          <span>Zarar (0.0)</span>
+          <span>Eşik (1.0)</span>
+          <span>Kâr (3.0+)</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AveragePnlCard({ value, label, sub, icon: Icon }) {
+  const isPositive = value >= 0;
+  const percentage = Math.min(Math.max((Math.abs(value) / 5.0) * 100, 0), 100);
+  const color = isPositive ? "text-emerald-400" : "text-red-400";
+  const barColor = isPositive ? "bg-emerald-500" : "bg-red-500";
+  
+  return (
+    <div className="bg-slate-800/90 border border-slate-700/80 rounded-xl p-4 flex flex-col justify-between gap-3 shadow-lg hover:shadow-cyan-500/10 transition-all duration-300">
+      <div className="flex items-center gap-1.5 text-[10px] text-slate-300 font-bold uppercase tracking-wider">
+        <Icon size={12} className="text-cyan-400" />
+        <span>{label}</span>
+      </div>
+      
+      <div className="flex justify-between items-end">
+        <div className={`text-2xl font-extrabold font-mono leading-none ${color}`}>
+          {isPositive ? '+' : ''}{value.toFixed(2)}%
+        </div>
+        {sub && <div className="text-[10px] text-slate-300 font-semibold text-right">{sub}</div>}
+      </div>
+      
+      <div className="space-y-1 pt-1">
+        <div className="relative h-2 bg-slate-900 rounded-full overflow-hidden border border-slate-700/30 flex items-center justify-center">
+          <div className="absolute top-0 bottom-0 left-1/2 w-0.5 bg-slate-700" />
+          
+          <div 
+            className={`absolute top-0 bottom-0 ${barColor} rounded-full transition-all duration-500 ease-out`}
+            style={{ 
+              left: isPositive ? '50%' : 'auto', 
+              right: isPositive ? 'auto' : '50%',
+              width: `${percentage / 2}%` 
+            }}
+          />
+        </div>
+        <div className="flex justify-between text-[8px] text-slate-400 font-semibold font-mono">
+          <span>-%5</span>
+          <span>0%</span>
+          <span>+%5</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TotalTradesCard({ value, label, sub, icon: Icon }) {
+  return (
+    <div className="bg-slate-800/90 border border-slate-700/80 rounded-xl p-4 flex flex-col justify-between gap-3 shadow-lg hover:shadow-cyan-500/10 transition-all duration-300">
+      <div className="flex items-center gap-1.5 text-[10px] text-slate-300 font-bold uppercase tracking-wider">
+        <Icon size={12} className="text-cyan-400" />
+        <span>{label}</span>
+      </div>
+      
+      <div className="flex justify-between items-end">
+        <div className="text-2xl font-extrabold font-mono text-white leading-none">
+          {value}
+        </div>
+        {sub && <div className="text-[10px] text-slate-300 font-semibold text-right">{sub}</div>}
+      </div>
+      
+      <div className="space-y-1 pt-1">
+        <div className="relative h-2 bg-slate-900 rounded-full overflow-hidden border border-slate-700/30">
+          <div className="h-full bg-cyan-500/40 animate-pulse" style={{ width: '100%' }} />
+        </div>
+        <div className="text-[8px] text-slate-400 font-semibold font-mono text-center">
+          Sistem Aktif ve İşlem Kaydediyor ⚡
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── PnL Sparkline ─────────────────────────────────────────────────────────────
 function PnlSparkline({ items }) {
   if (!items?.length) return null;
-  const data = items.slice(-30).map((x, i) => ({ i, v: parseFloat(x.income) }));
+  
+  // Sort oldest to newest chronologically
+  const chronological = [...items].reverse();
   const cumul = [];
   let sum = 0;
-  data.forEach(d => { sum += d.v; cumul.push({ i: d.i, v: parseFloat(sum.toFixed(4)) }); });
+  chronological.forEach((x) => {
+    sum += parseFloat(x.income);
+    cumul.push({
+      date: new Date(x.time).toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }),
+      dateShort: new Date(x.time).toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit' }),
+      v: parseFloat(sum.toFixed(2)),
+      pnl: parseFloat(parseFloat(x.income).toFixed(2)),
+      trade: `${x.symbol} (${parseFloat(x.income) >= 0 ? '+' : ''}${parseFloat(x.income).toFixed(2)} ₺)`
+    });
+  });
+  
   const last = cumul[cumul.length - 1]?.v ?? 0;
+  
   return (
-    <div className="h-16">
+    <div className="h-56 w-full pt-4">
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={cumul}>
+        <AreaChart data={cumul} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
           <defs>
             <linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%"  stopColor={last >= 0 ? '#22c55e' : '#ef4444'} stopOpacity={0.3} />
-              <stop offset="95%" stopColor={last >= 0 ? '#22c55e' : '#ef4444'} stopOpacity={0}   />
+              <stop offset="5%"  stopColor={last >= 0 ? '#10b981' : '#ef4444'} stopOpacity={0.25} />
+              <stop offset="95%" stopColor={last >= 0 ? '#10b981' : '#ef4444'} stopOpacity={0.0}   />
             </linearGradient>
           </defs>
-          <XAxis dataKey="i" hide />
-          <ReTooltip formatter={v => [v + ' USDT', 'Kümülatif PnL']} contentStyle={{ background:'#111827', border:'1px solid #1e3a5f', fontSize:11 }} />
-          <Area type="monotone" dataKey="v" stroke={last >= 0 ? '#22c55e' : '#ef4444'} fill="url(#pnlGrad)" strokeWidth={1.5} dot={false} />
+          <CartesianGrid stroke="#334155" strokeDasharray="3 3" opacity={0.25} />
+          <XAxis 
+            dataKey="dateShort" 
+            stroke="#94a3b8" 
+            fontSize={9} 
+            tickLine={false} 
+            axisLine={false} 
+          />
+          <YAxis 
+            stroke="#94a3b8" 
+            fontSize={9} 
+            tickLine={false} 
+            axisLine={false} 
+            tickFormatter={(v) => `${v} ₺`}
+          />
+          <ReTooltip 
+            content={({ active, payload }) => {
+              if (active && payload && payload.length) {
+                const data = payload[0].payload;
+                return (
+                  <div className="bg-slate-900 border border-slate-700 p-3 rounded-lg font-mono text-[10px] space-y-1.5 shadow-xl text-slate-300">
+                    <div className="text-slate-400 font-bold">{data.date}</div>
+                    <div className="flex justify-between gap-4">
+                      <span>Kümülatif PnL:</span>
+                      <span className={`font-extrabold ${data.v >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {data.v >= 0 ? '+' : ''}{data.v.toFixed(2)} ₺
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-4">
+                      <span>Son İşlem:</span>
+                      <span className={data.pnl >= 0 ? 'text-emerald-400 font-bold' : 'text-red-400 font-bold'}>
+                        {data.trade}
+                      </span>
+                    </div>
+                  </div>
+                );
+              }
+              return null;
+            }}
+          />
+          <Area 
+            type="monotone" 
+            dataKey="v" 
+            stroke={last >= 0 ? '#10b981' : '#ef4444'} 
+            fill="url(#pnlGrad)" 
+            strokeWidth={2} 
+            dot={false} 
+          />
         </AreaChart>
       </ResponsiveContainer>
     </div>
@@ -570,8 +845,73 @@ export default function App() {
   const [mkSort,         setMkSort]         = useState({ col: 'quoteVolume', dir: -1 });
   const [latency,        setLatency]        = useState(null);
 
+  // Bot kontrol state'leri
+  const [botRunning,     setBotRunning]     = useState(true);
+  const [botToggling,    setBotToggling]    = useState(false);
+  const [closingAll,     setClosingAll]     = useState(false);
+  const [showCloseAllConfirm, setShowCloseAllConfirm] = useState(false);
+  const [showBotToggleConfirm, setShowBotToggleConfirm] = useState(false);
+
   const logEndRef = useRef(null);
   const prevSignalsLengthRef = useRef(0);
+
+  // Bot durumunu periyodik olarak sorgula
+  useEffect(() => {
+    const checkBotStatus = async () => {
+      try {
+        const resp = await fetch(`${API_URL}/api/bot/status`);
+        const data = await resp.json();
+        setBotRunning(data.botRunning);
+      } catch (e) {
+        console.error('Bot status error:', e);
+      }
+    };
+    checkBotStatus();
+    const interval = setInterval(checkBotStatus, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Bot Durdur/Başlat
+  const handleBotToggle = async () => {
+    setShowBotToggleConfirm(false);
+    setBotToggling(true);
+    try {
+      const resp = await fetch(`${API_URL}/api/bot/toggle`, { method: 'POST' });
+      const data = await resp.json();
+      if (data.success) {
+        setBotRunning(data.botRunning);
+      } else {
+        alert(`Bot kontrol hatası: ${data.error || 'Bilinmeyen hata'}`);
+      }
+    } catch (e) {
+      alert(`Bot kontrol hatası: ${e.message}`);
+    } finally {
+      setBotToggling(false);
+    }
+  };
+
+  // Tüm Pozisyonları Kapat
+  const handleCloseAll = async () => {
+    setShowCloseAllConfirm(false);
+    setClosingAll(true);
+    try {
+      const resp = await fetch(`${API_URL}/api/positions/close-all`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await resp.json();
+      if (data.success) {
+        alert(`✅ ${data.closed} pozisyon kapatıldı${data.failed > 0 ? `, ${data.failed} başarısız` : ''}`);
+        fetchAll();
+      } else {
+        alert(`❌ Hata: ${data.error || 'Bilinmeyen hata'}`);
+      }
+    } catch (e) {
+      alert(`❌ Hata: ${e.message}`);
+    } finally {
+      setClosingAll(false);
+    }
+  };
 
   // Ses ayar panelinin dışına tıklandığında kapanması için click-outside hook'u
   useEffect(() => {
@@ -1006,12 +1346,123 @@ export default function App() {
             )}
           </div>
 
+          {/* ── Bot Kontrol Butonları ── */}
+          <button
+            id="btn-bot-toggle"
+            onClick={() => setShowBotToggleConfirm(true)}
+            disabled={botToggling}
+            className={`flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded border font-bold transition-all cursor-pointer ${
+              botToggling ? 'border-gray-700 text-gray-500 bg-gray-800 cursor-wait'
+              : botRunning
+                ? 'border-red-800 text-red-400 bg-red-950/30 hover:bg-red-900/50 hover:border-red-600'
+                : 'border-green-800 text-green-400 bg-green-950/30 hover:bg-green-900/50 hover:border-green-600'
+            }`}
+            title={botRunning ? 'Botu Durdur' : 'Botu Başlat'}
+          >
+            {botToggling
+              ? <><Loader2 size={12} className="animate-spin" /> İŞLEM...</>
+              : botRunning
+                ? <><Square size={11} /> DURDUR</>
+                : <><Play size={11} /> BAŞLAT</>
+            }
+          </button>
+
+          <button
+            id="btn-close-all"
+            onClick={() => setShowCloseAllConfirm(true)}
+            disabled={closingAll || binPositions.length === 0}
+            className={`flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded border font-bold transition-all cursor-pointer ${
+              closingAll ? 'border-gray-700 text-gray-500 bg-gray-800 cursor-wait'
+              : binPositions.length === 0 ? 'border-gray-800 text-gray-600 bg-gray-900 cursor-not-allowed'
+              : 'border-orange-800 text-orange-400 bg-orange-950/30 hover:bg-orange-900/50 hover:border-orange-500'
+            }`}
+            title="Tüm Pozisyonları Kapat"
+          >
+            {closingAll
+              ? <><Loader2 size={12} className="animate-spin" /> KAPATILIYOR...</>
+              : <><XCircle size={12} /> HEPSİNİ KAPAT</>
+            }
+          </button>
+
           <div className={`flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded border ${connected?'border-green-700 text-green-400':'border-red-800 text-red-400'}`}>
             {connected ? <Wifi size={11}/> : <WifiOff size={11}/>}
             {connected ? 'ONLINE' : 'OFFLINE'}
           </div>
         </div>
       </header>
+
+      {/* ── Bot Toggle Onay Modalı ── */}
+      {showBotToggleConfirm && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-gray-900 border border-cyan-800 rounded-xl p-6 max-w-sm w-full mx-4 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3">
+              <div className={`p-2 rounded-lg ${botRunning ? 'bg-red-950 border border-red-800' : 'bg-green-950 border border-green-800'}`}>
+                {botRunning ? <Square size={20} className="text-red-400" /> : <Play size={20} className="text-green-400" />}
+              </div>
+              <div>
+                <div className="text-sm font-bold text-white">{botRunning ? 'Botu Durdur?' : 'Botu Başlat?'}</div>
+                <div className="text-[11px] text-gray-400">
+                  {botRunning
+                    ? 'Scanner ve Order Worker durdurulacak. Açık pozisyonlar korunur ancak SL/TP takibi duracaktır.'
+                    : 'Scanner ve Order Worker yeniden başlatılacak. Sinyal tarama ve SL/TP takibi aktif olacaktır.'
+                  }
+                </div>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowBotToggleConfirm(false)}
+                className="flex-1 py-2 border border-gray-700 rounded-lg text-gray-400 text-xs font-bold hover:bg-gray-800 transition-colors cursor-pointer"
+              >İPTAL</button>
+              <button
+                onClick={handleBotToggle}
+                className={`flex-1 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  botRunning
+                    ? 'bg-red-900/60 border border-red-700 text-red-300 hover:bg-red-800'
+                    : 'bg-green-900/60 border border-green-700 text-green-300 hover:bg-green-800'
+                }`}
+              >{botRunning ? '🛑 EVET, DURDUR' : '▶️ EVET, BAŞLAT'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Tüm Pozisyonları Kapat Onay Modalı ── */}
+      {showCloseAllConfirm && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-gray-900 border border-orange-800 rounded-xl p-6 max-w-sm w-full mx-4 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-orange-950 border border-orange-800">
+                <XCircle size={20} className="text-orange-400" />
+              </div>
+              <div>
+                <div className="text-sm font-bold text-white">Tüm Pozisyonları Kapat?</div>
+                <div className="text-[11px] text-gray-400">
+                  {binPositions.length} açık pozisyonun tamamı piyasa fiyatından satılacak. Bu işlem geri alınamaz!
+                </div>
+              </div>
+            </div>
+            <div className="bg-orange-950/30 border border-orange-900 rounded-lg p-2.5 text-[10px] text-orange-300 space-y-1">
+              {binPositions.map((p, i) => (
+                <div key={i} className="flex justify-between">
+                  <span className="font-bold">{p.symbol}</span>
+                  <span>Miktar: {p.quantity} | PnL: {fmtPct(p.final_pnl_pct || ((parseFloat(p.currentPrice || p.entry_price) - p.entry_price) / p.entry_price * 100))}</span>
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowCloseAllConfirm(false)}
+                className="flex-1 py-2 border border-gray-700 rounded-lg text-gray-400 text-xs font-bold hover:bg-gray-800 transition-colors cursor-pointer"
+              >İPTAL</button>
+              <button
+                onClick={handleCloseAll}
+                className="flex-1 py-2 bg-orange-900/60 border border-orange-700 rounded-lg text-orange-300 text-xs font-bold hover:bg-orange-800 transition-colors cursor-pointer"
+              >⚠️ EVET, HEPSİNİ KAPAT</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── SEKME NAVİGASYONU ── */}
       <div className="flex gap-1 border-b border-cyan-900 pb-0">
@@ -1051,24 +1502,57 @@ export default function App() {
 
           {/* Bakiye Kartları */}
           <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-            <StatCard icon={Wallet} label={`Cüzdan Bakiyesi (${quoteAsset})`}    value={balance ? fmt(balance.walletBalance,2) + (quoteAsset === 'TRY' ? ' ₺' : ' $') : '…'} color="text-cyan-400" />
-            <StatCard icon={Coins} label={`Kullanılabilir (${quoteAsset})`}      value={balance ? fmt(balance.availableBalance,2) + (quoteAsset === 'TRY' ? ' ₺' : ' $') : '…'} color="text-green-400" />
-            <StatCard icon={TrendingUp} label="Gerçekleşmemiş PnL"  value={balance ? fmt(balance.unrealizedPnl,2) + (quoteAsset === 'TRY' ? ' ₺' : ' $') : '…'} color={balance ? pnlColor(balance.unrealizedPnl) : 'text-gray-400'} />
-            <StatCard icon={Activity}   label="7G Gerçekleşen PnL"  value={fmt(income.totalPnl,2) + (quoteAsset === 'TRY' ? ' ₺' : ' $')} color={pnlColor(income.totalPnl)} />
-            <StatCard icon={Briefcase}  label="Açık Pozisyon"       value={binPositions.length} color="text-purple-400" />
+            {(() => {
+              const positionsValue = binPositions.reduce((sum, p) => sum + Math.abs(parseFloat(p.positionAmt || 0)) * parseFloat(p.markPrice || p.entryPrice || 0), 0);
+              const available = balance ? parseFloat(balance.availableBalance) : 0;
+              const dynamicWallet = available + positionsValue;
+              const sym = quoteAsset === 'TRY' ? ' ₺' : ' $';
+              return (<>
+                <StatCard icon={Wallet} label={`Cüzdan Bakiyesi (${quoteAsset})`} value={fmt(dynamicWallet, 2) + sym} color="text-cyan-400" sub={positionsValue > 0 ? `Serbest ${fmt(available,2)}${sym} + Pozisyon ${fmt(positionsValue,2)}${sym}` : undefined} />
+                <StatCard icon={Coins} label={`Kullanılabilir (${quoteAsset})`} value={balance ? fmt(balance.availableBalance,2) + sym : '…'} color="text-green-400" />
+                {(() => {
+                  const totalUpnl = binPositions.reduce((s, p) => s + parseFloat(p.unRealizedProfit || 0), 0);
+                  return <StatCard icon={TrendingUp} label="Gerçekleşmemiş PnL" value={fmt(totalUpnl, 2) + sym} color={pnlColor(totalUpnl)} sub={binPositions.length > 0 ? `${binPositions.length} açık pozisyon` : undefined} />;
+                })()}
+                <StatCard icon={Activity} label="7G Gerçekleşen PnL" value={fmt(income.totalPnl,2) + sym} color={pnlColor(income.totalPnl)} />
+                <StatCard icon={Briefcase} label="Açık Pozisyon" value={binPositions.length} color="text-purple-400" />
+              </>);
+            })()}
           </div>
 
-          {/* Performans İstatistikleri */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-            <StatCard icon={Zap} label="Kazanma Oranı (Win Rate)" value={winRate.toFixed(1) + ' %'} color={winRate >= 50 ? 'text-green-400' : 'text-yellow-400'} sub={`${winningTrades.length} Başarılı / ${totalClosed} Toplam`} />
-            <StatCard icon={TrendingUp} label="Kâr Faktörü (Profit Factor)" value={profitFactor === 99.9 ? '∞' : profitFactor.toFixed(2)} color={profitFactor >= 1.5 ? 'text-green-400' : profitFactor >= 1.0 ? 'text-yellow-400' : 'text-red-400'} sub="Toplam Kâr / Toplam Zarar" />
-            <StatCard icon={Activity} label="Ortalama İşlem PnL" value={fmtPct(avgPnl)} color={pnlColor(avgPnl)} sub="İşlem başına ortalama getiri" />
-            <StatCard icon={History} label="Toplam Kapatılan İşlem" value={totalClosed} color="text-gray-400" sub="Tüm bot işlem geçmişi" />
+          {/* Performans İstatistikleri (Dairesel ve Efektif Grafik Göstergeleri) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <CircularProgress 
+              value={winRate} 
+              label="Kazanma Oranı (Win Rate)" 
+              sub={`${winningTrades.length} Başarılı / ${totalClosed} Toplam`} 
+              color={winRate >= 50 ? 'text-green-400 font-extrabold' : 'text-yellow-400 font-extrabold'}
+              stroke={winRate >= 50 ? '#10b981' : '#f59e0b'}
+              icon={Zap}
+            />
+            <ProfitFactorGauge 
+              value={profitFactor} 
+              label="Kâr Faktörü (Profit Factor)" 
+              sub="Toplam Kâr / Toplam Zarar" 
+              icon={TrendingUp}
+            />
+            <AveragePnlCard 
+              value={avgPnl} 
+              label="Ortalama İşlem PnL" 
+              sub="İşlem başına ortalama getiri" 
+              icon={Activity}
+            />
+            <TotalTradesCard 
+              value={totalClosed} 
+              label="Toplam Kapatılan İşlem" 
+              sub="Tüm bot işlem geçmişi" 
+              icon={History}
+            />
           </div>
 
           {/* PnL Grafiği */}
           {income.items?.length > 0 && (
-            <div className="bg-gray-900 border border-cyan-900 rounded-lg p-4">
+            <div className="bg-slate-800/90 border border-slate-700/80 rounded-xl p-4 shadow-lg">
               <SectionHeader icon={TrendingUp} title={`7 Günlük Kümülatif PnL (${quoteAsset})`} />
               <PnlSparkline items={income.items} />
             </div>
@@ -1648,64 +2132,115 @@ export default function App() {
         
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm font-mono text-xs">
-            <div className="bg-gray-900 border border-cyan-800 rounded-lg p-5 w-[420px] glass-panel space-y-4 shadow-2xl text-cyan-300">
-              <div className="flex items-center justify-between border-b border-cyan-900 pb-2">
-                <span className="font-bold text-white uppercase tracking-widest text-sm flex items-center gap-1.5">
+            <div className="bg-slate-900 border border-slate-700/80 rounded-xl p-5 w-[440px] glass-panel space-y-4 shadow-2xl text-slate-300">
+              <div className="flex items-center justify-between border-b border-slate-700/50 pb-2">
+                <span className="font-extrabold text-white uppercase tracking-widest text-sm flex items-center gap-1.5">
                   🔔 SİNYAL DETAY ANALİZİ
                 </span>
-                <button onClick={() => setSelectedSignalForModal(null)} className="text-gray-500 hover:text-white transition-colors cursor-pointer text-sm font-bold">✕</button>
+                <button onClick={() => setSelectedSignalForModal(null)} className="text-slate-400 hover:text-white transition-colors cursor-pointer text-sm font-bold">✕</button>
               </div>
               
               {/* Card Info Header */}
-              <div className="flex justify-between items-start bg-gray-950/40 p-2.5 rounded border border-cyan-950/50">
-                <div>
-                  <div className="text-base font-bold text-white">{sig.symbol}</div>
-                  <div className="text-[10px] text-gray-500">{sig.matched_pattern || sig.star_label || 'OCC Sinyali'}</div>
+              <div className="flex justify-between items-start bg-slate-800/90 p-3 rounded-lg border border-slate-700/80 shadow-inner">
+                <div className="space-y-1.5">
+                  <div className="text-lg font-extrabold text-white">{sig.symbol}</div>
+                  {sig.segment_type ? (
+                    <div className="flex gap-1.5 items-center flex-wrap">
+                      <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold border ${
+                        sig.segment_type === "STRONG" 
+                          ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" 
+                          : "bg-indigo-500/10 border-indigo-500/30 text-indigo-400"
+                      }`}>
+                        {sig.segment_type === "STRONG" ? "🔥 BOĞA (TREND)" : "❄️ TEPKİ (DİP)"}
+                      </span>
+                      {sig.rs_score !== undefined && (
+                        <span className="text-[9px] font-bold text-slate-300 bg-slate-950/50 px-1.5 py-0.5 rounded border border-slate-800">
+                          RS: {sig.rs_score >= 0 ? '+' : ''}{(sig.rs_score * 100).toFixed(1)}%
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">{sig.matched_pattern || sig.star_label || 'OCC Sinyali'}</div>
+                  )}
                 </div>
-                <div className="text-right">
+                <div className="text-right space-y-1">
                   <Badge label={sig.status} color={statusColor} />
-                  <div className="text-yellow-300 text-sm mt-0.5">{sig.stars || '⭐'}</div>
+                  <div className="text-yellow-400 font-bold text-sm tracking-wider">{sig.stars || '⭐'}</div>
                 </div>
               </div>
 
+              {/* Trigger & Strategy Details */}
+              {sig.candlestick_pattern && (
+                <div className="bg-slate-800/60 border border-slate-700/60 p-3 rounded-lg space-y-1">
+                  <div className="text-[9px] text-slate-400 uppercase font-semibold">TETİK & GİRİŞ STRATEJİSİ</div>
+                  <div className="text-sm font-extrabold text-amber-300">
+                    ⚡ {sig.candlestick_pattern}
+                  </div>
+                  <div className="text-[10px] text-slate-300">
+                    Tetik Zaman Dilimi: <span className="text-white font-mono font-bold">{sig.trigger_tf || 'N/A'}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Pipeline Filters checklist */}
+              {sig.pipeline_filters && (
+                <div className="bg-slate-800/60 border border-slate-700/60 p-3 rounded-lg space-y-2">
+                  <div className="text-[9px] text-slate-400 uppercase font-semibold">GÜNLÜK PIPELINE FİLTRELERİ</div>
+                  <div className="grid grid-cols-3 gap-2 text-center text-[10px]">
+                    <div className={`p-1.5 rounded border ${sig.pipeline_filters.ema_ok ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-400' : 'bg-red-950/30 border-red-500/30 text-red-400'}`}>
+                      <div>EMA Filtresi</div>
+                      <div className="font-extrabold mt-0.5">{sig.pipeline_filters.ema_ok ? 'GEÇTİ 🟢' : 'KALDI 🔴'}</div>
+                    </div>
+                    <div className={`p-1.5 rounded border ${sig.pipeline_filters.rsi_ok ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-400' : 'bg-red-950/30 border-red-500/30 text-red-400'}`}>
+                      <div>RSI Filtresi</div>
+                      <div className="font-extrabold mt-0.5">{sig.pipeline_filters.rsi_ok ? 'GEÇTİ 🟢' : 'KALDI 🔴'}</div>
+                    </div>
+                    <div className={`p-1.5 rounded border ${sig.pipeline_filters.vol_ok ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-400' : 'bg-red-950/30 border-red-500/30 text-red-400'}`}>
+                      <div>Hacim Filtresi</div>
+                      <div className="font-extrabold mt-0.5">{sig.pipeline_filters.vol_ok ? 'GEÇTİ 🟢' : 'KALDI 🔴'}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* RSI / ADX Gauges */}
               <div className="grid grid-cols-2 gap-3">
-                <div className="bg-gray-950/40 border border-cyan-950/40 p-2.5 rounded text-center space-y-2">
-                  <div className="text-[9px] text-gray-500 uppercase">RSI GÖSTERGESİ</div>
+                <div className="bg-slate-800/60 border border-slate-700/60 p-2.5 rounded text-center space-y-2">
+                  <div className="text-[9px] text-slate-400 uppercase font-semibold">RSI GÖSTERGESİ</div>
                   <div className="relative flex justify-center items-center h-12 w-full">
-                    <div className="absolute w-24 h-12 border-t-8 border-l-8 border-r-8 border-cyan-950 rounded-t-full" />
+                    <div className="absolute w-24 h-12 border-t-8 border-l-8 border-r-8 border-slate-800 rounded-t-full" />
                     <div 
                       className="absolute w-24 h-12 border-t-8 border-l-8 border-r-8 border-cyan-500 rounded-t-full origin-bottom transition-transform"
                       style={{ transform: `rotate(${(rsiPct/100)*180 - 90}deg)` }}
                     />
                     <span className="absolute bottom-0 text-white font-bold text-sm">{fmt(sig.rsi_value,1)}</span>
                   </div>
-                  <span className="text-[9px] text-gray-400 capitalize">{sig.rsi_quality} Bölgesi</span>
+                  <span className="text-[9px] text-slate-300 capitalize">{sig.rsi_quality} Bölgesi</span>
                 </div>
 
-                <div className="bg-gray-950/40 border border-cyan-950/40 p-2.5 rounded text-center space-y-2">
-                  <div className="text-[9px] text-gray-500 uppercase">TREND GÜCÜ (ADX)</div>
+                <div className="bg-slate-800/60 border border-slate-700/60 p-2.5 rounded text-center space-y-2">
+                  <div className="text-[9px] text-slate-400 uppercase font-semibold">TREND GÜCÜ (ADX)</div>
                   <div className="relative flex justify-center items-center h-12 w-full">
-                    <div className="absolute w-24 h-12 border-t-8 border-l-8 border-r-8 border-cyan-950 rounded-t-full" />
+                    <div className="absolute w-24 h-12 border-t-8 border-l-8 border-r-8 border-slate-800 rounded-t-full" />
                     <div 
                       className="absolute w-24 h-12 border-t-8 border-l-8 border-r-8 border-yellow-500 rounded-t-full origin-bottom transition-transform"
                       style={{ transform: `rotate(${(adxPct/100)*180 - 90}deg)` }}
                     />
                     <span className="absolute bottom-0 text-white font-bold text-sm">{fmt(sig.adx_value,1)}</span>
                   </div>
-                  <span className="text-[9px] text-gray-400 capitalize">{sig.adx_regime} Rejimi</span>
+                  <span className="text-[9px] text-slate-300 capitalize">{sig.adx_regime} Rejimi</span>
                 </div>
               </div>
 
               {/* Risk/Reward yatay visual bar */}
-              <div className="space-y-2 bg-gray-950/40 p-3 rounded border border-cyan-950/30">
-                <div className="text-[9px] text-gray-500 uppercase flex justify-between">
+              <div className="space-y-2 bg-slate-800/60 border border-slate-700/60 p-3 rounded-lg">
+                <div className="text-[9px] text-slate-400 uppercase flex justify-between font-semibold">
                   <span>R:R ORANI (1:{(sig.take_profit_pct/sig.stop_loss_pct).toFixed(1)})</span>
                   <span className="text-white font-bold">Risk/Reward Çizelgesi</span>
                 </div>
                 
                 {/* Progress line */}
-                <div className="relative h-2 w-full bg-gray-800 rounded-full my-4">
+                <div className="relative h-2 w-full bg-slate-950 rounded-full my-4 border border-slate-800">
                   {/* Stop loss label */}
                   <span className="absolute -top-3 left-0 text-[8px] text-red-500 font-bold">SL ({fmt(sl)})</span>
                   {/* Take profit label */}
@@ -1713,7 +2248,7 @@ export default function App() {
                   
                   {/* Entry marker */}
                   <div 
-                    className="absolute -top-1 w-4 h-4 bg-cyan-400 border-2 border-gray-900 rounded-full shadow-[0_0_6px_#22d3ee] flex items-center justify-center -ml-2"
+                    className="absolute -top-1 w-4 h-4 bg-cyan-400 border-2 border-slate-900 rounded-full shadow-[0_0_6px_#22d3ee] flex items-center justify-center -ml-2"
                     style={{ left: `${entryPercent}%` }}
                     title={`Giriş: ${fmt(sig.price)}`}
                   />
@@ -1727,7 +2262,7 @@ export default function App() {
               </div>
 
               {/* Action Buttons */}
-              <div className="flex gap-2 pt-2 border-t border-cyan-950/30">
+              <div className="flex gap-2 pt-2 border-t border-slate-700/50">
                 <button 
                   onClick={() => {
                     handleSelectSignal(sig.symbol);
@@ -1741,7 +2276,7 @@ export default function App() {
                   onClick={() => {
                     setSelectedSignalForModal(null);
                   }}
-                  className="py-2 px-4 border border-gray-700 text-gray-400 rounded hover:bg-gray-800 font-bold transition-all uppercase text-[10px] cursor-pointer"
+                  className="py-2 px-4 border border-slate-700 text-slate-300 rounded hover:bg-slate-800 font-bold transition-all uppercase text-[10px] cursor-pointer"
                 >
                   Kapat
                 </button>

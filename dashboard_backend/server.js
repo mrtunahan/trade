@@ -8,6 +8,7 @@ const { Server } = require('socket.io');
 const mongoose  = require('mongoose');
 const cors      = require('cors');
 const fs        = require('fs');
+const { exec }  = require('child_process');
 const path      = require('path');
 const crypto    = require('crypto');
 const axios     = require('axios');
@@ -29,6 +30,62 @@ const API_KEY     = process.env.BINANCE_API_KEY     || '';
 const API_SECRET  = process.env.BINANCE_API_SECRET  || '';
 const QUOTE_ASSET = (process.env.QUOTE_ASSET || 'TRY').toUpperCase();
 const MAX_BUDGET_PER_TRADE = parseFloat(process.env.MAX_BUDGET_PER_TRADE || (QUOTE_ASSET === 'TRY' ? '500' : '50'));
+
+let symbolFilters = {};
+let filtersLoaded = false;
+
+async function loadSymbolFilters() {
+    if (filtersLoaded) return;
+    try {
+        console.log('🔄 Sembol filtreleri yükleniyor...');
+        const response = await axios.get('https://www.binance.tr/open/v1/common/symbols', { timeout: 15000 });
+        const list = response.data?.data?.list || [];
+        for (const s of list) {
+            const sym = s.symbol; // e.g. "BTC_TRY"
+            const filters = {};
+            for (const f of (s.filters || [])) {
+                if (f.filterType === 'LOT_SIZE') {
+                    filters.stepSize = parseFloat(f.stepSize || '1');
+                    filters.minQty = parseFloat(f.minQty || '0.001');
+                } else if (f.filterType === 'PRICE_FILTER') {
+                    filters.tickSize = parseFloat(f.tickSize || '0.01');
+                }
+            }
+            if (filters.stepSize || filters.tickSize) {
+                symbolFilters[sym] = filters;
+            }
+        }
+        filtersLoaded = true;
+        console.log(`✅ ${Object.keys(symbolFilters).length} sembol filtresi JS cache'e yüklendi.`);
+    } catch (e) {
+        console.warn(`⚠️ Sembol filtreleri yüklenemedi (JS): ${e.message}`);
+    }
+}
+
+function formatQuantity(quantity, trSymbol) {
+    if (!filtersLoaded) {
+        loadSymbolFilters().catch(() => {});
+    }
+    const filters = symbolFilters[trSymbol] || {};
+    const stepSize = filters.stepSize || 0.001;
+    const minQty = filters.minQty || 0.001;
+    
+    const qty = parseFloat(quantity);
+    if (isNaN(qty) || qty <= 0) return '0';
+
+    let formattedQty;
+    if (stepSize >= 1) {
+        formattedQty = Math.floor(qty / stepSize) * stepSize;
+        return Math.max(formattedQty, minQty).toString();
+    } else {
+        const precision = Math.max(0, Math.round(-Math.log10(stepSize)));
+        formattedQty = Math.floor(qty / stepSize) * stepSize;
+        return Math.max(parseFloat(formattedQty.toFixed(precision)), minQty).toFixed(precision);
+    }
+}
+
+// Sembol filtrelerini arka planda hemen yüklemeye başla
+loadSymbolFilters().catch(e => console.error('Sembol filtreleri yüklenirken hata oluştu:', e.message));
 
 const STABLECOIN_BASES = new Set([
     "USDT", "USDC", "FDUSD", "TUSD", "BUSD", "DAI", 
@@ -71,8 +128,12 @@ function mapTrParams(params) {
         }
     }
     if (newParams.quantity) {
-        const qty = parseFloat(newParams.quantity);
-        newParams.quantity = qty < 1 ? qty.toFixed(4) : qty.toFixed(3);
+        if (newParams.symbol) {
+            newParams.quantity = formatQuantity(newParams.quantity, newParams.symbol);
+        } else {
+            const qty = parseFloat(newParams.quantity);
+            newParams.quantity = qty < 1 ? qty.toFixed(4) : qty.toFixed(3);
+        }
     }
     if (newParams.price) {
         const price = parseFloat(newParams.price);
@@ -109,6 +170,10 @@ async function fapi(endpoint, params = {}) {
 }
 
 async function fapiPublic(endpoint, params = {}) {
+    const cleanedParams = { ...params };
+    if (cleanedParams.symbol) {
+        cleanedParams.symbol = String(cleanedParams.symbol).replace('_', '').toUpperCase();
+    }
     const url = `${TR_PUBLIC_BASE}${endpoint}`;
     const headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
@@ -117,7 +182,7 @@ async function fapiPublic(endpoint, params = {}) {
         headers['X-MBX-APIKEY'] = API_KEY;
     }
     const res = await axios.get(url, { 
-        params, 
+        params: cleanedParams, 
         headers,
         timeout: 10000 
     });
@@ -203,10 +268,17 @@ app.get('/api/dashboard/all-data', async (req, res) => {
         let positionsData = [];
         try {
             const openDbPos = await Position.find({ status: 'OPEN' });
-            for (const p of openDbPos) {
+            // Her pozisyon sembolü için anlık fiyat çek (paralel)
+            await Promise.all(openDbPos.map(async (p) => {
                 const sym = p.symbol;
-                const tickerCache = cache.ticker[sym]?.data || {};
-                const currentPrice = parseFloat(tickerCache.lastPrice || p.entry_price || 0);
+                let currentPrice = parseFloat(cache.ticker[sym]?.data?.lastPrice || 0);
+                if (!currentPrice || (Date.now() - (cache.ticker[sym]?.ts || 0)) > CACHE_TTL_MS) {
+                    try {
+                        const t = await fapiPublic('/api/v3/ticker/price', { symbol: sym.toUpperCase() });
+                        currentPrice = parseFloat(t.price || 0);
+                        cache.ticker[sym] = { data: { ...cache.ticker[sym]?.data, lastPrice: t.price }, ts: Date.now() };
+                    } catch { currentPrice = parseFloat(p.entry_price || 0); }
+                }
                 const entry = parseFloat(p.entry_price || 0);
                 const qty = parseFloat(p.quantity || 0);
                 const pnl = (currentPrice - entry) * qty;
@@ -227,7 +299,7 @@ app.get('/api/dashboard/all-data', async (req, res) => {
                     allocated_budget: (entry * qty).toFixed(2),
                     open_time: p.open_time || null,
                 });
-            }
+            }));
         } catch (e) {
             console.log("DB positions fetch error:", e.message);
         }
@@ -286,6 +358,25 @@ app.get('/api/dashboard/all-data', async (req, res) => {
             }
         }
         
+        // Gerçekleşmemiş PnL'yi açık pozisyonlardan hesapla
+        const totalUnrealizedPnl = positionsData.reduce((sum, p) => sum + parseFloat(p.unRealizedProfit || 0), 0);
+        if (balanceData) {
+            balanceData.unrealizedPnl = parseFloat(totalUnrealizedPnl.toFixed(4));
+            
+            // Toplam cüzdan değerini hesaplayalım (TRY bakiye + tüm açık pozisyonların piyasa değeri)
+            let openPositionsValue = 0;
+            positionsData.forEach(p => {
+                const qty = parseFloat(p.positionAmt || 0);
+                const currentPrice = parseFloat(p.markPrice || 0);
+                if (qty > 0 && currentPrice > 0) {
+                    openPositionsValue += qty * currentPrice;
+                }
+            });
+            // Cüzdan bakiyesi = TRY Bakiye (free + locked) + Açık Pozisyonların Değeri
+            balanceData.walletBalance = balanceData.walletBalance + openPositionsValue;
+            balanceData.marginBalance = balanceData.walletBalance; // spot'ta ikisi aynı gösterilir
+        }
+
         res.json({
             balance: balanceData,
             positions: positionsData || [],
@@ -310,11 +401,32 @@ app.get('/api/binance/balance', async (req, res) => {
         const data = await fapi('/open/v1/account/spot');
         const balances = data.data?.accountAssets || data.data?.balances || data.balances || [];
         const quoteBal = balances.find(a => a.asset === QUOTE_ASSET) || {};
+        
+        // Açık pozisyonların güncel piyasa değerini hesaplayalım
+        let openPositionsValue = 0;
+        try {
+            const openDbPos = await Position.find({ status: 'OPEN' });
+            for (const p of openDbPos) {
+                let currentPrice = parseFloat(cache.ticker[p.symbol]?.data?.lastPrice || 0);
+                if (!currentPrice) {
+                    try {
+                        const t = await fapiPublic('/api/v3/ticker/price', { symbol: p.symbol.toUpperCase() });
+                        currentPrice = parseFloat(t.price || 0);
+                    } catch {
+                        currentPrice = parseFloat(p.entry_price || 0);
+                    }
+                }
+                openPositionsValue += parseFloat(p.quantity || 0) * currentPrice;
+            }
+        } catch (dbErr) {
+            console.error('Error fetching open positions for balance:', dbErr.message);
+        }
+
         const formatted = {
-            walletBalance:    parseFloat(quoteBal.free || 0) + parseFloat(quoteBal.locked || 0),
+            walletBalance:    parseFloat(quoteBal.free || 0) + parseFloat(quoteBal.locked || 0) + openPositionsValue,
             availableBalance: parseFloat(quoteBal.free || 0),
             unrealizedPnl:    0,
-            marginBalance:    parseFloat(quoteBal.free || 0),
+            marginBalance:    parseFloat(quoteBal.free || 0) + openPositionsValue,
             totalInitialMargin: 0,
             quoteAsset:       QUOTE_ASSET,
             maxBudget:        MAX_BUDGET_PER_TRADE,
@@ -336,10 +448,16 @@ app.get('/api/binance/positions', async (req, res) => {
     try {
         const openDbPos = await Position.find({ status: 'OPEN' });
         const positionsData = [];
-        for (const p of openDbPos) {
+        await Promise.all(openDbPos.map(async (p) => {
             const sym = p.symbol;
-            const tickerCache = cache.ticker[sym]?.data || {};
-            const currentPrice = parseFloat(tickerCache.lastPrice || p.entry_price || 0);
+            let currentPrice = parseFloat(cache.ticker[sym]?.data?.lastPrice || 0);
+            if (!currentPrice || (Date.now() - (cache.ticker[sym]?.ts || 0)) > CACHE_TTL_MS) {
+                try {
+                    const t = await fapiPublic('/api/v3/ticker/price', { symbol: sym.toUpperCase() });
+                    currentPrice = parseFloat(t.price || 0);
+                    cache.ticker[sym] = { data: { ...cache.ticker[sym]?.data, lastPrice: t.price }, ts: Date.now() };
+                } catch { currentPrice = parseFloat(p.entry_price || 0); }
+            }
             const entry = parseFloat(p.entry_price || 0);
             const qty = parseFloat(p.quantity || 0);
             const pnl = (currentPrice - entry) * qty;
@@ -360,7 +478,7 @@ app.get('/api/binance/positions', async (req, res) => {
                 allocated_budget: (entry * qty).toFixed(2),
                 open_time: p.open_time || null,
             });
-        }
+        }));
         res.json(positionsData);
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -622,12 +740,56 @@ app.post('/api/positions/close', async (req, res) => {
         const posSide = side || 'LONG';
         const orderSide = posSide === 'LONG' ? 'SELL' : 'BUY';
         
+        const cleanSymbol = symbol.toUpperCase();
+        const baseAsset = cleanSymbol.replace('TRY', '').replace('USDT', '');
+        const formattedSymbol = formatTrSymbol(cleanSymbol);
+
+        let sellQty = parseFloat(quantity);
+
+        try {
+            // Binance TR'den gerçek bakiyeyi çekelim (fee kesintisini bertaraf etmek için)
+            const balanceData = await fapi('/open/v1/account/spot');
+            const assets = balanceData?.data?.accountAssets || [];
+            const assetInfo = assets.find(a => a.asset === baseAsset);
+            const actualBalance = parseFloat(assetInfo?.free || '0');
+
+            const filters = symbolFilters[formattedSymbol] || {};
+            const minQty = filters.minQty || 0.001;
+
+            if (actualBalance < minQty) {
+                // Bakiye yetersiz veya sıfırsa, doğrudan DB üzerinde kapatıp bitir
+                const openPos = await Position.findOne({ symbol: symbol, status: 'OPEN' });
+                if (openPos) {
+                    await Position.updateOne(
+                        { _id: openPos._id },
+                        {
+                            $set: {
+                                status: 'CLOSED',
+                                close_time: new Date(),
+                                close_reason: 'MANUAL_CLOSE_NO_BALANCE',
+                                exit_price: null,
+                                final_pnl_pct: null,
+                            }
+                        }
+                    );
+                }
+                return res.json({ success: true, message: 'Binance üzerinde bakiye sıfır veya yetersiz. Pozisyon DB üzerinde kapatıldı.' });
+            }
+
+            // Gerçek bakiye talep edilen miktardan azsa (komisyon yüzünden), gerçek bakiyeyi satalım
+            if (actualBalance < sellQty) {
+                sellQty = actualBalance;
+            }
+        } catch (balErr) {
+            console.error('Bakiye sorgulama hatası (bireysel kapatma):', balErr.message);
+        }
+
         // Binance'te kapatma emri gönder (Spot: positionSide parametresi kaldırılır)
         const order = await fapiPost('/open/v1/orders', {
-            symbol: symbol.toUpperCase(),
+            symbol: formattedSymbol,
             side: orderSide,
             type: 'MARKET',
-            quantity: Math.abs(parseFloat(quantity)).toString(),
+            quantity: sellQty.toString(),
         });
         
         // Binance.TR yanıtı: {code:0, msg:'Success', data:{orderId:..., executedPrice:...}}
@@ -770,7 +932,6 @@ app.post('/api/orders/place', async (req, res) => {
         if (type.toUpperCase() === 'LIMIT') {
             if (!price) return res.status(400).json({ error: 'Limit emir için fiyat girilmelidir' });
             orderParams.price = price.toString();
-            orderParams.timeInForce = 'GTC';
         }
 
         // 3. Binance'te İşlemi Aç (Spot orders endpoint)
@@ -853,6 +1014,193 @@ app.post('/api/positions/update-protection', async (req, res) => {
 
         await Position.updateOne({ _id: openPos._id }, { $set: updates });
         res.json({ success: true, updates });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+
+// ==================== BOT KONTROL & ACİL KAPATMA ====================
+
+// ─── Bot Durumunu Sorgula (PM2) ──────────────────────────────────────────────
+app.get('/api/bot/status', async (req, res) => {
+    try {
+        exec('pm2 jlist', (error, stdout, stderr) => {
+            if (error) {
+                return res.status(500).json({ error: `PM2 çalıştırılamadı: ${error.message}` });
+            }
+            try {
+                const processes = JSON.parse(stdout);
+                const scanner = processes.find(p => p.name === 'trade-scanner');
+                const worker = processes.find(p => p.name === 'order-worker');
+
+                const scannerOnline = scanner && scanner.pm2_env?.status === 'online';
+                const workerOnline = worker && worker.pm2_env?.status === 'online';
+                const botRunning = scannerOnline && workerOnline;
+
+                const processList = [];
+                if (scanner) {
+                    processList.push({
+                        name: scanner.name,
+                        status: scanner.pm2_env?.status || 'unknown',
+                        uptime: scanner.pm2_env?.pm_uptime || null,
+                        memory: scanner.monit?.memory || 0,
+                        cpu: scanner.monit?.cpu || 0,
+                    });
+                }
+                if (worker) {
+                    processList.push({
+                        name: worker.name,
+                        status: worker.pm2_env?.status || 'unknown',
+                        uptime: worker.pm2_env?.pm_uptime || null,
+                        memory: worker.monit?.memory || 0,
+                        cpu: worker.monit?.cpu || 0,
+                    });
+                }
+
+                res.json({ botRunning, processes: processList });
+            } catch (parseErr) {
+                res.status(500).json({ error: `PM2 çıktısı ayrıştırılamadı: ${parseErr.message}` });
+            }
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ─── Bot Aç/Kapat (PM2 Toggle) ──────────────────────────────────────────────
+app.post('/api/bot/toggle', async (req, res) => {
+    try {
+        exec('pm2 jlist', (error, stdout, stderr) => {
+            if (error) {
+                return res.status(500).json({ error: `PM2 çalıştırılamadı: ${error.message}` });
+            }
+            try {
+                const processes = JSON.parse(stdout);
+                const scanner = processes.find(p => p.name === 'trade-scanner');
+                const worker = processes.find(p => p.name === 'order-worker');
+
+                const scannerOnline = scanner && scanner.pm2_env?.status === 'online';
+                const workerOnline = worker && worker.pm2_env?.status === 'online';
+                const isRunning = scannerOnline && workerOnline;
+
+                // Çalışıyorsa durdur, durmuşsa başlat
+                const cmd = isRunning
+                    ? 'pm2 stop trade-scanner order-worker'
+                    : 'pm2 restart trade-scanner order-worker';
+
+                exec(cmd, (err2, stdout2, stderr2) => {
+                    if (err2) {
+                        return res.status(500).json({ error: `PM2 komutu başarısız: ${err2.message}` });
+                    }
+                    res.json({ success: true, botRunning: !isRunning });
+                });
+            } catch (parseErr) {
+                res.status(500).json({ error: `PM2 çıktısı ayrıştırılamadı: ${parseErr.message}` });
+            }
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ─── Tüm Açık Pozisyonları Acil Kapat (Market Close All) ────────────────────
+app.post('/api/positions/close-all', async (req, res) => {
+    try {
+        const openPositions = await Position.find({ status: 'OPEN' });
+        if (openPositions.length === 0) {
+            return res.json({ success: true, closed: 0, failed: 0, details: [], message: 'Kapatılacak açık pozisyon yok.' });
+        }
+
+        // Binance TR'den güncel bakiye bilgisini çek
+        const balanceData = await fapi('/open/v1/account/spot');
+        const assets = balanceData?.data?.accountAssets || [];
+
+        let closedCount = 0;
+        let failedCount = 0;
+        const details = [];
+
+        for (const pos of openPositions) {
+            const symbol = pos.symbol;
+            const baseAsset = symbol.replace('TRY', '').replace('USDT', '');
+            const formattedSymbol = formatTrSymbol(symbol);
+
+            try {
+                // İlgili coin'in gerçek bakiyesini bul
+                const assetInfo = assets.find(a => a.asset === baseAsset);
+                const actualBalance = parseFloat(assetInfo?.free || '0');
+
+                const filters = symbolFilters[formattedSymbol] || {};
+                const minQty = filters.minQty || 0.001;
+
+                // Bakiye sıfırsa veya minimum miktardan küçükse DB'de kapat ama Binance emri gönderme
+                if (actualBalance < minQty) {
+                    await Position.updateOne(
+                        { _id: pos._id },
+                        {
+                            $set: {
+                                status: 'CLOSED',
+                                close_time: new Date(),
+                                close_reason: 'EMERGENCY_CLOSE_ALL_NO_BALANCE',
+                                exit_price: null,
+                                final_pnl_pct: null,
+                            }
+                        }
+                    );
+                    closedCount++;
+                    details.push({ symbol, status: 'closed_no_balance', message: 'Bakiye yetersiz veya 0, DB güncellendi' });
+                    continue;
+                }
+
+                // Market SELL emri gönder (gerçek bakiye ile)
+                // mapTrParams bunu formatQuantity ile otomatik ve güvenli bir şekilde formatlayacaktır.
+                const order = await fapiPost('/open/v1/orders', {
+                    symbol: formattedSymbol,
+                    side: '1',       // SELL
+                    type: '2',       // MARKET
+                    quantity: actualBalance.toString(),
+                });
+
+                if (order && order.code === 0) {
+                    const orderData = order.data || {};
+                    const exitPrice = parseFloat(orderData.executedPrice || orderData.avgPrice || 0);
+                    const entryPrice = parseFloat(pos.entry_price || 0);
+                    let finalPnlPct = null;
+                    if (entryPrice > 0 && exitPrice > 0) {
+                        finalPnlPct = parseFloat((((exitPrice - entryPrice) / entryPrice) * 100).toFixed(4));
+                    }
+
+                    await Position.updateOne(
+                        { _id: pos._id },
+                        {
+                            $set: {
+                                status: 'CLOSED',
+                                close_time: new Date(),
+                                close_reason: 'EMERGENCY_CLOSE_ALL',
+                                exit_price: exitPrice || null,
+                                final_pnl_pct: finalPnlPct,
+                            }
+                        }
+                    );
+                    closedCount++;
+                    details.push({ symbol, status: 'closed', exitPrice, pnlPct: finalPnlPct, orderId: orderData.orderId });
+
+                    // GÜNCELLEME: Yerel bakiye önbelleğini azaltalım, böylece mükerrer pozisyonlarda tekrar Binance'e gitmez
+                    const qtySold = parseFloat(formatQuantity(actualBalance, formattedSymbol));
+                    if (assetInfo) {
+                        assetInfo.free = (actualBalance - qtySold).toString();
+                    }
+                } else {
+                    failedCount++;
+                    details.push({ symbol, status: 'failed', error: order?.msg || 'Bilinmeyen hata' });
+                }
+            } catch (posErr) {
+                failedCount++;
+                details.push({ symbol, status: 'failed', error: posErr.message });
+            }
+        }
+
+        res.json({ success: true, closed: closedCount, failed: failedCount, details });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }

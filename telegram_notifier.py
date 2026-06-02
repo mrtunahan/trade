@@ -16,8 +16,6 @@ from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     SEND_CHART_IMAGE,
-    OCC_MIN_SCORE,
-    OCC_TIMEFRAMES,
 )
 
 logger = logging.getLogger("Telegram")
@@ -107,56 +105,39 @@ class TelegramNotifier:
 
     def send_multi_tf_signal(self, signal, chart_bytes: Optional[bytes] = None) -> bool:
         """
-        Hiyerarşik multi-TF OCC alım sinyalini gönderir.
+        Premium Spot Pipeline alım sinyalini gönderir.
         Gelişmiş premium çıktı şablonu.
         """
         import math
         quote = "TRY" if signal.symbol.endswith("TRY") else "USDT"
         base = signal.symbol.replace("TRY", "").replace("USDT", "")
 
-        # Puan ve yıldız
+        # Puan ve segment
         rating = signal.signal_star_rating
         stars = rating["stars"]
         score_label = rating["label"]
 
-        # Trend puanı detayı (örn: 1d: Yeşil, 4h: Kırmızı, 1h: Yeşil, 15m: Yeşil)
+        # Günlük gösterge detayları (örn: Daily EMA50>EMA200: Yeşil, Daily RSI: Yeşil, Daily Volume: Yeşil)
         tf_details = []
         for ts in signal.tf_statuses:
-            if ts.weight > 0:  # Sadece puanı olan üst TF'ler
-                status_str = "Yeşil" if ts.is_green else "Kırmızı"
-                tf_details.append(f"{ts.timeframe}: {status_str}")
+            status_str = "Yeşil" if ts.is_green else "Kırmızı"
+            tf_details.append(f"{ts.label}: {status_str}")
         tf_details_str = ", ".join(tf_details)
 
         # Tetikleyici timeframe bilgisi
         trigger_tf_label = signal.trigger_tf
-        trigger_tf_desc = f"{trigger_tf_label} Grafik Kapanışı ile Yeni Yeşil Kesişim (Onaylandı)"
+        trigger_tf_desc = f"{trigger_tf_label} Grafik Kapanışı ile Onaylandı"
 
-        # Mum formasyonu (Ekstra Onay)
-        extra_onay = signal.candlestick_pattern or "Belirgin Desen Yok"
+        # Mum formasyonu / Tetikleyici
+        extra_onay = signal.candlestick_pattern or "Pullback / Kesişim"
 
-        # ADX bilgisi ve trend modu
-        adx_val = signal.adx_value
-        if not math.isnan(adx_val):
-            if signal.adx_regime == "trending":
-                adx_desc = f"{adx_val:.1f} (Güçlü Trend - Geniş TP/SL Modu Aktif)"
-            elif signal.adx_regime == "weak":
-                adx_desc = f"{adx_val:.1f} (Zayıf Trend - Dar TP/SL Modu Aktif)"
-            else:
-                adx_desc = f"{adx_val:.1f} (Orta Trend - Standart TP/SL Modu Aktif)"
-        else:
-            adx_desc = "N/A"
+        # ADX bilgisi ve trend modu (Piyasa Rejimi)
+        adx_desc = f"{signal.segment_type} (Boğa/Trend)" if signal.segment_type == "STRONG" else f"{signal.segment_type} (Aşırı Satım/Tepki)"
 
         # RSI bilgisi
         rsi_val = signal.rsi_value
         if not math.isnan(rsi_val):
-            if signal.rsi_quality == "ideal":
-                rsi_desc = f"{rsi_val:.1f} (Aşırı Şişme Yok, Alan Güvenli)"
-            elif signal.rsi_quality == "caution":
-                rsi_desc = f"{rsi_val:.1f} (Kısmi Şişme, Dikkat)"
-            elif signal.rsi_quality == "blocked":
-                rsi_desc = f"{rsi_val:.1f} (Aşırı Şişmiş, Riskli)"
-            else:
-                rsi_desc = f"{rsi_val:.1f} (Stabil)"
+            rsi_desc = f"{rsi_val:.1f} (Günlük Grafik)"
         else:
             rsi_desc = "N/A"
 
@@ -173,14 +154,14 @@ class TelegramNotifier:
         message = (
             f"🟢 <b>[AL SİNYALİ] - {base}/{quote} // {score_label} {stars}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Strateji:</b> Multi-Timeframe OCC (Hiyerarşik Onaylı)\n"
-            f"<b>Trend Puanı:</b> {signal.total_score}/{signal.max_score} ({tf_details_str})\n"
-            f"<b>Tetikleyici:</b> {trigger_tf_desc}\n"
-            f"<b>Ekstra Onay:</b> {extra_onay}\n"
-            f"<b>Piyasa Durumu (ADX):</b> {adx_desc}\n"
-            f"<b>RSI Durumu:</b> {rsi_desc}\n"
+            f"<b>Strateji:</b> Spot 4-Stage Pipeline ({signal.segment_type} Segment)\n"
+            f"<b>Günlük Skor:</b> {signal.total_score}/{signal.max_score} ({tf_details_str})\n"
+            f"<b>Tetikleyici Zaman:</b> {trigger_tf_desc}\n"
+            f"<b>Giriş Tetiği:</b> {extra_onay}\n"
+            f"<b>Piyasa Rejimi:</b> {adx_desc}\n"
+            f"<b>Günlük RSI:</b> {rsi_desc}\n"
             f"<b>Giriş Fiyatı:</b> {price:,.4f} {quote}\n"
-            f"<b>Dinamik SL:</b> {dynamic_sl_tp}\n"
+            f"<b>Dinamik SL/TP:</b> {dynamic_sl_tp}\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"💼 <b>Öneri:</b> %{signal.position_size_pct*100:.0f} ({signal.position_tier})\n"
             f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -249,20 +230,15 @@ class TelegramNotifier:
     # ==================== BAŞLANGIÇ ====================
 
     def send_startup(self, pair_count: int) -> bool:
-        tf_list = ", ".join(f"{tf}({w}p)" for tf, (w, _, _) in OCC_TIMEFRAMES.items())
-        trigger_tf = next((tf for tf, (w, _, _) in OCC_TIMEFRAMES.items() if w == 0), "5m")
-
         message = (
-            f"🎯 <b>Multi-TF OCC Scanner Aktif!</b>\n"
+            f"🎯 <b>Spot 4-Stage Pipeline Scanner Aktif!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"\n"
             f"📊 Takip: {pair_count} parite\n"
-            f"📐 Timeframe'ler: {tf_list}\n"
-            f"🎯 Min puan eşiği: {OCC_MIN_SCORE}\n"
+            f"⚙️ Tarama Döngüsü: 5 Dakika\n"
             f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"\n"
-            f"Her OCC renk değişiminde bildirim gönderilecek.\n"
-            f"Puan ≥{OCC_MIN_SCORE} + {trigger_tf} tetikleyici → ALIM sinyali."
+            f"Trend ve Tepki segment sinyalleri otomatik olarak takip ediliyor."
         )
         return self.send_message(message)
 

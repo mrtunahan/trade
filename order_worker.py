@@ -22,7 +22,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("order_worker.log", encoding="utf-8"),
     ],
 )
 logger = logging.getLogger("OrderWorker")
@@ -61,6 +60,7 @@ class OrderWorker:
     def __init__(self):
         self.market = MarketData()
         self.running = True
+        self.last_balance_warning_time = 0.0
 
         # MongoDB bağlantısı
         try:
@@ -69,7 +69,34 @@ class OrderWorker:
             self.db = self.db_client[MONGO_DB]
             self.signals_col   = self.db["signals"]
             self.positions_col = self.db["positions"]
-            logger.info("MongoDB bağlantısı kuruldu.")
+            
+            # Performans için MongoDB indekslerini oluşturalım
+            self.signals_col.create_index([("status", 1)])
+            self.signals_col.create_index([("symbol", 1), ("status", 1)])
+            self.signals_col.create_index([("timestamp", -1)])
+            self.positions_col.create_index([("status", 1)])
+            self.positions_col.create_index([("symbol", 1), ("status", 1)])
+            
+            logger.info("MongoDB bağlantısı kuruldu ve indeksler doğrulandı.")
+            
+            # Geriye dönük uyumluluk: Açık pozisyonlardaki eksik yıldız alanlarını sinyallerinden tamamla
+            try:
+                open_positions = list(self.positions_col.find({"status": "OPEN", "star_label": {"$exists": False}}))
+                for pos in open_positions:
+                    sig_id = pos.get("signal_id")
+                    if sig_id:
+                        sig_doc = self.signals_col.find_one({"_id": sig_id})
+                        if sig_doc:
+                            self.positions_col.update_one(
+                                {"_id": pos["_id"]},
+                                {"$set": {
+                                    "star_label": sig_doc.get("stars", "⭐"),
+                                    "position_tier": sig_doc.get("star_label", "Fırsat")
+                                }}
+                            )
+                            logger.info(f"💾 {pos['symbol']} açık pozisyonunun yıldız bilgileri sinyalden güncellendi.")
+            except Exception as mig_err:
+                logger.warning(f"Açık pozisyon yıldız güncelleme hatası: {mig_err}")
         except Exception as e:
             logger.critical(f"MongoDB bağlantı hatası: {e}")
             sys.exit(1)
@@ -84,9 +111,56 @@ class OrderWorker:
         if not signals:
             return
 
-        logger.info(f"{len(signals)} adet PENDING sinyal bulundu.")
-
+        # ── Sinyal Zaman Aşımı Kontrolü (Maksimum 3 Saniye) ──
+        active_signals = []
         for sig in signals:
+            signal_age = (datetime.now() - sig["timestamp"]).total_seconds()
+            if signal_age > 3.0:
+                logger.warning(
+                    f"⏰ {sig['symbol']} sinyali zaman aşımına uğradı ({signal_age:.1f}s > 3s). İptal ediliyor."
+                )
+                self._mark_signal(sig["_id"], "EXPIRED", f"Zaman aşımı: {signal_age:.1f}s")
+            else:
+                active_signals.append(sig)
+
+        if not active_signals:
+            return
+
+        logger.info(f"{len(active_signals)} adet taze PENDING sinyal bulundu.")
+
+        # ── Bakiye koruma kontrolü ──
+        # Kullanılabilir TRY < cüzdan değerinin %20'si → alımları beklet
+        available_try = self.market.get_available_balance(QUOTE_ASSET)
+        wallet_value = self._calculate_wallet_value(available_try)
+
+        if wallet_value > 0:
+            balance_ratio = available_try / wallet_value
+            if balance_ratio < 0.20:
+                now_ts = time.time()
+                if now_ts - self.last_balance_warning_time >= 15.0:
+                    logger.info(
+                        f"💰 Bakiye durumu: Serbest={available_try:.2f} TRY | "
+                        f"Cüzdan={wallet_value:.2f} TRY | Oran=%{balance_ratio*100:.1f}"
+                    )
+                    logger.warning(
+                        f"🛑 BAKİYE KORUMA MODU AKTİF! Serbest TRY ({available_try:.2f}) "
+                        f"cüzdan değerinin %{balance_ratio*100:.1f}'i — %20 eşiğinin altında. "
+                        f"Alımlar bekletiliyor."
+                    )
+                    self.last_balance_warning_time = now_ts
+                for sig in active_signals:
+                    self._mark_signal(
+                        sig["_id"], "PENDING",
+                        f"Bakiye koruma: %{balance_ratio*100:.1f} < %20 eşiği"
+                    )
+                return
+            else:
+                logger.info(
+                    f"💰 Bakiye durumu: Serbest={available_try:.2f} TRY | "
+                    f"Cüzdan={wallet_value:.2f} TRY | Oran=%{balance_ratio*100:.1f}"
+                )
+
+        for sig in active_signals:
             symbol = sig["symbol"]
             logger.info(f"İşleniyor: {symbol}")
 
@@ -125,10 +199,10 @@ class OrderWorker:
                 f"Bütçe: {allocated:.2f} {QUOTE_ASSET} | Miktar: {quantity}"
             )
 
-            # ── Emir gönder (Spot alım: BUY MARKET) ──
+            # ── Emir gönder (Spot alım: BUY LIMIT) ──
             if TRADE_CONFIG["enabled"]:
                 order_resp = self.market.create_futures_order(
-                    symbol, "BUY", "LONG", "MARKET", quantity
+                    symbol, "BUY", "LONG", "LIMIT", quantity, price=current_price
                 )
                 
                 # Binance.TR yanıtı: {"code":0, "msg":"Success", "data":{"orderId":..., "executedPrice":..., "executedQty":...}}
@@ -158,7 +232,13 @@ class OrderWorker:
                 fill_price = float(order.get("executedPrice") or order.get("avgPrice") or order.get("price") or current_price)
                 if fill_price == 0:
                     fill_price = current_price
-                logger.info(f"✅ {symbol} Spot alındı. OrderId: {order_id} | Dolum Fiyatı: {fill_price}")
+                # Gerçek dolum miktarını kullan (komisyon düşülmüş miktar)
+                executed_qty = float(order.get("executedQty", 0))
+                if executed_qty > 0:
+                    quantity = executed_qty
+                    logger.info(f"✅ {symbol} Spot alındı. OrderId: {order_id} | Dolum Fiyatı: {fill_price} | Gerçek Miktar: {executed_qty}")
+                else:
+                    logger.info(f"✅ {symbol} Spot alındı. OrderId: {order_id} | Dolum Fiyatı: {fill_price} | Miktar: {quantity} (executedQty yok)")
             else:
                 # Simülasyon modu
                 order_id = -1
@@ -178,6 +258,8 @@ class OrderWorker:
                 "order_id":        order_id,
                 "signal_id":       sig["_id"],
                 "matched_pattern": sig.get("matched_pattern", ""),
+                "star_label":      sig.get("stars", "⭐"),
+                "position_tier":   sig.get("star_label", "Fırsat"),
                 "total_score":     sig.get("total_score", 0),
                 "status":          "OPEN",
                 "open_time":       datetime.now(),
@@ -222,13 +304,48 @@ class OrderWorker:
                 logger.debug(f"{symbol} | {current_price:.6f} | PnL: {pnl:+.2f}%")
                 continue
 
-            # ── Pozisyonu kapat (Spot satış: SELL MARKET) ──
+            # ── Pozisyonu kapat (Spot satış: SELL LIMIT) ──
             logger.info(f"🚪 {symbol} kapatılıyor. Neden: {close_reason}")
             if TRADE_CONFIG["enabled"]:
+                sell_qty = pos["quantity"]
                 sell_resp = self.market.create_futures_order(
-                    symbol, "SELL", "LONG", "MARKET", pos["quantity"]
+                    symbol, "SELL", "LONG", "LIMIT", sell_qty, price=current_price
                 )
                 logger.info(f"📦 {symbol} Satış API Yanıtı: {sell_resp}")
+                
+                # Insufficient balance hatası → gerçek bakiyeyi çekip tekrar dene
+                if sell_resp and sell_resp.get("code") == 2202:
+                    logger.warning(f"⚠️ {symbol} yetersiz bakiye, gerçek bakiye sorgulanıyor...")
+                    # Sembolden base asset'i çıkar (MEMETRY → MEME, 1MBABYDOGETRY → 1MBABYDOGE)
+                    base_asset = symbol.replace("TRY", "").replace("USDT", "")
+                    actual_balance = self.market.get_asset_balance(base_asset)
+                    if actual_balance > 0:
+                        logger.info(f"📊 {symbol} gerçek bakiye: {actual_balance} | Kayıtlı: {sell_qty}")
+                        sell_qty = actual_balance
+                        # Pozisyondaki miktarı güncelle
+                        self.positions_col.update_one(
+                            {"_id": pos["_id"]},
+                            {"$set": {"quantity": actual_balance}}
+                        )
+                        sell_resp = self.market.create_futures_order(
+                            symbol, "SELL", "LONG", "LIMIT", sell_qty, price=current_price
+                        )
+                        logger.info(f"📦 {symbol} 2. Satış Denemesi Yanıtı: {sell_resp}")
+                    else:
+                        logger.error(f"❌ {symbol} gerçek bakiye 0, pozisyon kapatılamıyor!")
+                        # Bakiye yoksa pozisyonu otomatik kapat (coin zaten elden çıkmış olabilir)
+                        self.positions_col.update_one(
+                            {"_id": pos["_id"]},
+                            {"$set": {
+                                "status": "CLOSED",
+                                "close_time": datetime.now(),
+                                "close_reason": f"{close_reason}_BALANCE_SIFIR",
+                                "exit_price": current_price,
+                                "final_pnl_pct": round(((current_price - pos['entry_price']) / pos['entry_price']) * 100, 4),
+                            }}
+                        )
+                        logger.info(f"📊 {symbol} bakiye sıfır, pozisyon kapatıldı olarak işaretlendi.")
+                        continue
                 
                 if not sell_resp or sell_resp.get("code", -1) != 0:
                     logger.error(f"❌ {symbol} spot pozisyonu satılamadı! Yanıt: {sell_resp}")
@@ -262,6 +379,23 @@ class OrderWorker:
 
     # ==================== YARDIMCI ====================
 
+    def _calculate_wallet_value(self, available_try: float) -> float:
+        """
+        Toplam cüzdan değerini TRY cinsinden hesaplar.
+        Cüzdan değeri = Serbest TRY + Açık pozisyonların güncel piyasa değeri
+        """
+        total = available_try
+
+        open_positions = list(self.positions_col.find({"status": "OPEN"}))
+        for pos in open_positions:
+            symbol = pos["symbol"]
+            qty = pos.get("quantity", 0)
+            current_price = self.market.get_price(symbol)
+            if current_price and qty > 0:
+                total += qty * current_price
+
+        return total
+
     def _mark_signal(self, signal_id, status: str, note: str = ""):
         self.signals_col.update_one(
             {"_id": signal_id},
@@ -278,24 +412,29 @@ class OrderWorker:
             f"Bütçe/İşlem: {TRADE_CONFIG['max_budget_per_trade']} {QUOTE_ASSET}"
         )
 
-        tick = 0
+        last_track_time = 0.0
+        fast_poll_interval = 0.5
+
         while self.running:
             try:
+                # 1. PENDING sinyalleri milisaniyeler bazında kontrol et
                 self.process_pending_signals()
 
-                # Pozisyon takibini her 2 döngüde bir çalıştır
-                if tick % 2 == 0:
+                # 2. Açık pozisyonları daha seyrek kontrol et (örn. her 30-60 saniyede bir)
+                now = time.time()
+                if now - last_track_time >= TRADE_CONFIG["track_interval"]:
                     self.track_active_positions()
+                    last_track_time = now
 
-                tick += 1
-                time.sleep(TRADE_CONFIG["poll_interval"])
+                # 0.5 saniye uyu
+                time.sleep(fast_poll_interval)
 
             except KeyboardInterrupt:
                 logger.info("OrderWorker durduruluyor...")
                 self.running = False
             except Exception as e:
                 logger.error(f"OrderWorker döngü hatası: {e}", exc_info=True)
-                time.sleep(10)
+                time.sleep(5)
 
         self.db_client.close()
         logger.info("OrderWorker kapatıldı.")
