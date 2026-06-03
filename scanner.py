@@ -127,20 +127,20 @@ class Scanner:
     def _determine_market_regime(self) -> str:
         """
         AŞAMA 1: Market Regime Filtresi
-        BTC Daily verisi üzerinden piyasanın genel yönünü belirler.
+        BTC 1 Saatlik verisi üzerinden piyasanın genel yönünü belirler.
         """
-        logger.info("Stage 1: Market Regime analizi yapılıyor (BTC/TRY)...")
+        logger.info("Stage 1: Market Regime analizi yapılıyor (BTC 1h)...")
         btc_symbol = f"BTC{QUOTE_ASSET}"
         
-        # BTC Daily klines çek
-        df_btc = self.market.get_klines(btc_symbol, "1d", 250)
+        # BTC 1h klines çek
+        df_btc = self.market.get_klines(btc_symbol, "1h", 250)
         if df_btc is None or len(df_btc) < 200:
             # Fallback to BTCUSDT if BTCTRY fails or has insufficient data
             logger.warning("BTC/TRY verisi yetersiz, BTC/USDT üzerinden regime analizi yapılıyor...")
-            df_btc = self.market.get_klines("BTCUSDT", "1d", 250)
+            df_btc = self.market.get_klines("BTCUSDT", "1h", 250)
 
         if df_btc is None or len(df_btc) < 200:
-            logger.error("Bitcoin Daily klines alınamadı! Varsayılan olarak WEAK (Tepki) modu seçiliyor.")
+            logger.error("Bitcoin 1h klines alınamadı! Varsayılan olarak WEAK (Tepki) modu seçiliyor.")
             return "WEAK"
 
         # Göstergeleri hesapla
@@ -149,17 +149,17 @@ class Scanner:
         ema200 = closes.ewm(span=200, adjust=False).mean()
         adx = self.analyzer.calculate_adx(df_btc, 14)
 
-        # Son tamamlanmış günlük mum (-2)
+        # Son tamamlanmış 1h mum (-2)
         ema50_val = ema50.iloc[-2]
         ema200_val = ema200.iloc[-2]
         adx_val = adx.iloc[-2]
         
         self.btc_adx = float(adx_val)
         
-        logger.info(f"BTC Günlük Göstergeleri: EMA50={ema50_val:.1f} | EMA200={ema200_val:.1f} | ADX={adx_val:.1f}")
+        logger.info(f"BTC 1h Göstergeleri: EMA50={ema50_val:.1f} | EMA200={ema200_val:.1f} | ADX={adx_val:.1f}")
 
-        # Koşullar: ADX > 25 ve EMA50 > EMA200 ise Boğa/Trend
-        if adx_val > 25.0 and ema50_val > ema200_val:
+        # Koşul: EMA50 > EMA200 ise Yönü belirler (Boğa/Trend)
+        if ema50_val > ema200_val:
             logger.info("🔥 piyasa REJİMİ: BOĞA / TREND MODU AKTİF (Rotayı GÜÇLÜ 30'a çevir).")
             return "STRONG"
         else:
@@ -237,13 +237,19 @@ class Scanner:
 
     def _fetch_lower_tf_data(self, symbol: str, segment: str) -> tuple:
         """
-        Güçlü/Güçsüz segment adayları için tetikleme kontrolü kline'larını paralel çeker.
+        Adaylar için Macro, Setup ve Trigger zaman dilimlerini paralel çeker.
         """
-        tfs = ["5m", "15m"] if segment == "STRONG" else ["15m", "1h"]
+        tfs = ["1h", "15m", "3m", "1m"]
         lower_data = {}
         try:
             for tf in tfs:
-                limit = 60 if tf == "5m" else 35
+                if tf == "1h":
+                    limit = 250
+                elif tf == "15m":
+                    limit = 100
+                else:
+                    limit = 60
+                
                 df = self.market.get_klines(symbol, tf, limit)
                 if df is not None:
                     lower_data[tf] = df
@@ -288,14 +294,13 @@ class Scanner:
             if not self.running:
                 break
 
-            daily_df = daily_dfs.get(symbol)
             lower_data = lower_tfs_cache.get(symbol)
 
-            if daily_df is None or lower_data is None:
+            if lower_data is None:
                 continue
 
             # Analizi gerçekleştir
-            signal_obj = self.analyzer.analyze_candidate(symbol, regime, daily_df, lower_data)
+            signal_obj = self.analyzer.analyze_candidate(symbol, regime, lower_data)
             if signal_obj is None:
                 continue
 
@@ -306,18 +311,18 @@ class Scanner:
                     
                     signal_obj.adx_value = self.btc_adx
 
-                    # Günlük pipeline filtrelerini çek (dashboard'da rozet olarak göstereceğiz)
+                    # Pipeline filtrelerini çek (dashboard'da rozet olarak göstereceğiz)
                     pipeline_filters = {
                         "ema_ok": False,
                         "rsi_ok": False,
                         "vol_ok": False
                     }
                     for s in signal_obj.tf_statuses:
-                        if s.timeframe == "1d_ema":
+                        if s.timeframe == "1h_ema":
                             pipeline_filters["ema_ok"] = s.is_green
-                        elif s.timeframe == "1d_rsi":
+                        elif s.timeframe == "15m_rsi":
                             pipeline_filters["rsi_ok"] = s.is_green
-                        elif s.timeframe == "1d_vol":
+                        elif s.timeframe == "15m_vol":
                             pipeline_filters["vol_ok"] = s.is_green
 
                     # Kullanıcının görsel olarak takip etmek istediği OCC zaman dilimi durumlarını hesapla (Giriş kriteri değil, sadece görsel bilgi!)

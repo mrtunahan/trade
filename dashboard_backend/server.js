@@ -630,11 +630,19 @@ app.get('/api/binance/all-tickers', async (req, res) => {
     }
     try {
         const data = await fapiPublic('/api/v3/ticker/24hr');
+        const trSymbolsCount = Object.keys(symbolFilters).length;
         const usdt = data
             .filter(t => {
                 if (!t.symbol.endsWith(QUOTE_ASSET)) return false;
                 const base = t.symbol.slice(0, -QUOTE_ASSET.length);
-                return !STABLECOIN_BASES.has(base);
+                if (STABLECOIN_BASES.has(base)) return false;
+                
+                // Filtreler yüklendiyse sadece Binance.TR'de aktif olanları göster
+                if (trSymbolsCount > 0) {
+                    const trSymbol = formatTrSymbol(t.symbol);
+                    return !!symbolFilters[trSymbol];
+                }
+                return true;
             })
             .map(t => ({
                 symbol:         t.symbol,

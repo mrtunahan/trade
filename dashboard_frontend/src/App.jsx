@@ -338,16 +338,16 @@ function SignalCard({ sig, onSelect, onExecute, onOpenDetails }) {
   // Full Sniper (Tüm zaman dilimleri yeşil) tespiti ve özel ışıma efekti
   const isFullSniper = Array.isArray(sig.tf_statuses) && sig.tf_statuses.length > 0 && sig.tf_statuses.every(t => t.is_green);
   
-  let cardClass = "border-slate-700/80 bg-slate-800/90 hover:border-cyan-500/80 hover:bg-slate-800/95 hover:shadow-[0_0_20px_rgba(6,182,212,0.2)]";
+  let cardClass = "border-slate-600/80 bg-slate-700/80 hover:border-cyan-500/80 hover:bg-slate-700/90 hover:shadow-[0_0_20px_rgba(6,182,212,0.2)]";
   let badgeStarsColor = "text-yellow-400";
   
   if (isFullSniper) {
-    cardClass = "border-amber-500 bg-slate-800 shadow-[0_0_20px_rgba(245,158,11,0.25)] hover:border-amber-400 border-2";
+    cardClass = "border-amber-500 bg-slate-700/90 shadow-[0_0_20px_rgba(245,158,11,0.25)] hover:border-amber-400 border-2";
     badgeStarsColor = "text-amber-300";
   } else if (sig.stars === "⭐⭐⭐") {
-    cardClass = "border-emerald-500 bg-slate-800 shadow-[0_0_15px_rgba(16,185,129,0.2)] hover:border-emerald-400 hover:shadow-[0_0_20px_rgba(16,185,129,0.3)] border";
+    cardClass = "border-emerald-500 bg-slate-700/90 shadow-[0_0_15px_rgba(16,185,129,0.2)] hover:border-emerald-400 hover:shadow-[0_0_20px_rgba(16,185,129,0.3)] border";
   } else if (sig.stars === "⭐⭐") {
-    cardClass = "border-cyan-500 bg-slate-800 shadow-[0_0_15px_rgba(6,182,212,0.15)] hover:border-cyan-400 hover:shadow-[0_0_20px_rgba(6,182,212,0.25)] border";
+    cardClass = "border-cyan-500 bg-slate-700/90 shadow-[0_0_15px_rgba(6,182,212,0.15)] hover:border-cyan-400 hover:shadow-[0_0_20px_rgba(6,182,212,0.25)] border";
   }
 
   // RSI status and colors
@@ -438,22 +438,22 @@ function SignalCard({ sig, onSelect, onExecute, onOpenDetails }) {
         ) : null}
       </div>
 
-      {/* Daily Pipeline Filters checklist */}
+      {/* Aura Pipeline Filters checklist */}
       {sig.pipeline_filters && (
         <div className="flex items-center gap-2 text-[9px] bg-slate-900/60 border border-slate-700/40 rounded px-2 py-1 select-none">
-          <span className="text-slate-400 font-bold uppercase tracking-wider">Günlük Filtreler:</span>
+          <span className="text-slate-300 font-extrabold uppercase tracking-wider">Aura Filtreleri (1h/15m):</span>
           <span className="flex items-center gap-1">
-            <span className={sig.pipeline_filters.ema_ok ? "text-emerald-400 font-bold" : "text-red-400 font-bold"}>EMA</span>
+            <span className={sig.pipeline_filters.ema_ok ? "text-emerald-400 font-bold" : "text-red-400 font-bold"}>EMA (1h)</span>
             <span>{sig.pipeline_filters.ema_ok ? "🟢" : "🔴"}</span>
           </span>
           <span className="text-slate-700">|</span>
           <span className="flex items-center gap-1">
-            <span className={sig.pipeline_filters.rsi_ok ? "text-emerald-400 font-bold" : "text-red-400 font-bold"}>RSI</span>
+            <span className={sig.pipeline_filters.rsi_ok ? "text-emerald-400 font-bold" : "text-red-400 font-bold"}>RSI (15m)</span>
             <span>{sig.pipeline_filters.rsi_ok ? "🟢" : "🔴"}</span>
           </span>
           <span className="text-slate-700">|</span>
           <span className="flex items-center gap-1">
-            <span className={sig.pipeline_filters.vol_ok ? "text-emerald-400 font-bold" : "text-red-400 font-bold"}>HACİM</span>
+            <span className={sig.pipeline_filters.vol_ok ? "text-emerald-400 font-bold" : "text-red-400 font-bold"}>HACİM (15m)</span>
             <span>{sig.pipeline_filters.vol_ok ? "🟢" : "🔴"}</span>
           </span>
         </div>
@@ -2184,19 +2184,19 @@ export default function App() {
 
               {/* Pipeline Filters checklist */}
               {sig.pipeline_filters && (
-                <div className="bg-slate-800/60 border border-slate-700/60 p-3 rounded-lg space-y-2">
-                  <div className="text-[9px] text-slate-400 uppercase font-semibold">GÜNLÜK PIPELINE FİLTRELERİ</div>
+                <div className="bg-slate-850 border border-slate-700/60 p-3 rounded-lg space-y-2">
+                  <div className="text-[9px] text-slate-300 uppercase font-bold tracking-wider">AURA PIPELINE FİLTRELERİ (1H/15M)</div>
                   <div className="grid grid-cols-3 gap-2 text-center text-[10px]">
                     <div className={`p-1.5 rounded border ${sig.pipeline_filters.ema_ok ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-400' : 'bg-red-950/30 border-red-500/30 text-red-400'}`}>
-                      <div>EMA Filtresi</div>
+                      <div>EMA (1h) Filtresi</div>
                       <div className="font-extrabold mt-0.5">{sig.pipeline_filters.ema_ok ? 'GEÇTİ 🟢' : 'KALDI 🔴'}</div>
                     </div>
                     <div className={`p-1.5 rounded border ${sig.pipeline_filters.rsi_ok ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-400' : 'bg-red-950/30 border-red-500/30 text-red-400'}`}>
-                      <div>RSI Filtresi</div>
+                      <div>RSI (15m) Filtresi</div>
                       <div className="font-extrabold mt-0.5">{sig.pipeline_filters.rsi_ok ? 'GEÇTİ 🟢' : 'KALDI 🔴'}</div>
                     </div>
                     <div className={`p-1.5 rounded border ${sig.pipeline_filters.vol_ok ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-400' : 'bg-red-950/30 border-red-500/30 text-red-400'}`}>
-                      <div>Hacim Filtresi</div>
+                      <div>Hacim (15m) Filtresi</div>
                       <div className="font-extrabold mt-0.5">{sig.pipeline_filters.vol_ok ? 'GEÇTİ 🟢' : 'KALDI 🔴'}</div>
                     </div>
                   </div>

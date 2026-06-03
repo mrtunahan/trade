@@ -135,7 +135,7 @@ class SpotPipelineAnalyzer:
         dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
         return dx.ewm(alpha=1.0/period, adjust=False).mean()
 
-    def analyze_candidate(self, symbol: str, segment: str, daily_df: pd.DataFrame, 
+    def analyze_candidate(self, symbol: str, segment: str, 
                           lower_tfs_data: dict) -> Optional[SpotPipelineSignal]:
         """
         Her bir aday coin için Aşama 3 (Skorlama) ve Aşama 4 (Tetikleme) kontrolünü gerçekleştirir.
@@ -143,30 +143,42 @@ class SpotPipelineAnalyzer:
         Args:
             symbol: Coin sembolü (örn. "BTC_TRY")
             segment: "STRONG" (Güçlü 30) veya "WEAK" (Güçsüz 30)
-            daily_df: Günlük mum verisi
-            lower_tfs_data: Alt zaman dilimleri verisi {"5m": df, "15m": df, "1h": df}
+            lower_tfs_data: Alt zaman dilimleri verisi {"1h": df, "15m": df, "3m": df, "1m": df}
         """
-        if daily_df is None or len(daily_df) < 30:
+        df_1h = lower_tfs_data.get("1h")
+        df_15m = lower_tfs_data.get("15m")
+        df_3m = lower_tfs_data.get("3m")
+        df_1m = lower_tfs_data.get("1m")
+
+        if df_1h is None or len(df_1h) < 30 or df_15m is None or len(df_15m) < 30:
             return None
 
-        closes = daily_df["close"]
-        volumes = daily_df["volume"]
-        
-        # ── GÜNLÜK GÖSTERGELER ──
-        ema50 = closes.ewm(span=50, adjust=False).mean()
-        ema200 = closes.ewm(span=200, adjust=False).mean()
-        rsi = self.calculate_rsi(closes, 14)
-        vol_ma = volumes.rolling(20).mean()
+        # ── MACRO FILTER (1-Hour) ──
+        closes_1h = df_1h["close"]
+        ema50_1h = closes_1h.ewm(span=50, adjust=False).mean()
+        ema200_1h = closes_1h.ewm(span=200, adjust=False).mean()
 
-        # Son kapanmış günlük bar (-2)
-        ema50_val = _safe_float(ema50, -2)
-        ema200_val = _safe_float(ema200, -2)
-        rsi_val = _safe_float(rsi, -2)
-        rsi_prev = _safe_float(rsi, -3)
-        vol_val = _safe_float(volumes, -2)
-        vol_ma_val = _safe_float(vol_ma, -2)
+        ema50_val = _safe_float(ema50_1h, -2)
+        ema200_val = _safe_float(ema200_1h, -2)
+
+        # ── SETUP FILTER (15-Minute) ──
+        closes_15m = df_15m["close"]
+        volumes_15m = df_15m["volume"]
+        rsi_15m = self.calculate_rsi(closes_15m, 14)
+        vol_ma_15m = volumes_15m.rolling(20).mean()
+
+        rsi_val = _safe_float(rsi_15m, -2)
+        rsi_prev = _safe_float(rsi_15m, -3)
+        vol_val = _safe_float(volumes_15m, -2)
+        vol_ma_val = _safe_float(vol_ma_15m, -2)
         
-        price = _safe_float(closes, -1)  # Canlı fiyat son bardır (-1)
+        price = _safe_float(closes_1h, -1)  # Canlı fiyat (en küçük zaman dilimi veya 1h)
+        if df_1m is not None and len(df_1m) > 0:
+            price = _safe_float(df_1m["close"], -1)
+        elif df_3m is not None and len(df_3m) > 0:
+            price = _safe_float(df_3m["close"], -1)
+        elif df_15m is not None and len(df_15m) > 0:
+            price = _safe_float(closes_15m, -1)
 
         total_score = 0
         max_score = 7
@@ -179,16 +191,16 @@ class SpotPipelineAnalyzer:
         # ── AŞAMA 3: SKORLAMA (Trend + Momentum Hibriti) ──
         if segment == "STRONG":
             # 1. EMA50 > EMA200 (+3 Puan)
-            ema_ok = ema50_val > ema200_val
+            ema_ok = ema50_val > ema200_val if not math.isnan(ema50_val) and not math.isnan(ema200_val) else False
             if ema_ok:
                 total_score += 3
-            tf_statuses.append(OccTfStatus(timeframe="1d_ema", label="Daily EMA50 > EMA200", weight=3, is_green=ema_ok))
+            tf_statuses.append(OccTfStatus(timeframe="1h_ema", label="1h EMA50 > EMA200", weight=3, is_green=ema_ok))
 
             # 2. RSI 55 - 70 (+2 Puan)
-            rsi_ok = 55.0 <= rsi_val <= 70.0
+            rsi_ok = 55.0 <= rsi_val <= 70.0 if not math.isnan(rsi_val) else False
             if rsi_ok:
                 total_score += 2
-            tf_statuses.append(OccTfStatus(timeframe="1d_rsi", label="Daily RSI (55-70)", weight=2, is_green=rsi_ok))
+            tf_statuses.append(OccTfStatus(timeframe="15m_rsi", label="15m RSI (55-70)", weight=2, is_green=rsi_ok))
 
             # 3. Volume > 20MA * 1.5 (+2 Puan)
             vol_ok = False
@@ -196,21 +208,22 @@ class SpotPipelineAnalyzer:
                 vol_ok = vol_val > (vol_ma_val * 1.5)
             if vol_ok:
                 total_score += 2
-            tf_statuses.append(OccTfStatus(timeframe="1d_vol", label="Daily Vol > 1.5xMA", weight=2, is_green=vol_ok))
+            tf_statuses.append(OccTfStatus(timeframe="15m_vol", label="15m Vol > 1.5xMA", weight=2, is_green=vol_ok))
 
             score_threshold = SPOT_PIPELINE["strong"]["score_threshold"]
             
         else:  # WEAK segment
             # 1. EMA50 < EMA200 (+0 Puan)
-            ema_ok = ema50_val < ema200_val
-            tf_statuses.append(OccTfStatus(timeframe="1d_ema", label="Daily EMA50 < EMA200", weight=0, is_green=ema_ok))
+            ema_ok = ema50_val < ema200_val if not math.isnan(ema50_val) and not math.isnan(ema200_val) else False
+            tf_statuses.append(OccTfStatus(timeframe="1h_ema", label="1h EMA50 < EMA200", weight=0, is_green=ema_ok))
 
             # 2. RSI < 30 veya RSI Dip Dönüş (+3 Puan)
-            # RSI dip dönüşü: RSI 30 ile 45 arasında ve dünkünden daha yukarıda (kafayı kaldırmış)
-            rsi_ok = rsi_val < 30.0 or (30.0 <= rsi_val <= 45.0 and rsi_val > rsi_prev)
+            rsi_ok = False
+            if not math.isnan(rsi_val):
+                rsi_ok = rsi_val < 30.0 or (30.0 <= rsi_val <= 45.0 and (math.isnan(rsi_prev) or rsi_val > rsi_prev))
             if rsi_ok:
                 total_score += 3
-            tf_statuses.append(OccTfStatus(timeframe="1d_rsi", label="Daily RSI Bottom/Up", weight=3, is_green=rsi_ok))
+            tf_statuses.append(OccTfStatus(timeframe="15m_rsi", label="15m RSI Bottom/Up", weight=3, is_green=rsi_ok))
 
             # 3. Volume > 20MA * 2.0 (+4 Puan)
             vol_ok = False
@@ -218,7 +231,7 @@ class SpotPipelineAnalyzer:
                 vol_ok = vol_val > (vol_ma_val * 2.0)
             if vol_ok:
                 total_score += 4
-            tf_statuses.append(OccTfStatus(timeframe="1d_vol", label="Daily Vol > 2.0xMA", weight=4, is_green=vol_ok))
+            tf_statuses.append(OccTfStatus(timeframe="15m_vol", label="15m Vol > 2.0xMA", weight=4, is_green=vol_ok))
 
             score_threshold = SPOT_PIPELINE["weak"]["score_threshold"]
 
@@ -235,77 +248,41 @@ class SpotPipelineAnalyzer:
         trigger_tf = "N/A"
         candlestick_pattern = ""
 
-        if segment == "STRONG":
-            # 5m veya 15m pullback hold veya golden cross kontrolü
-            for tf in ["5m", "15m"]:
-                df_lower = lower_tfs_data.get(tf)
-                if df_lower is None or len(df_lower) < 55:
-                    continue
+        # 3m ve 1m golden cross ve pullback kontrolü
+        for tf in ["3m", "1m"]:
+            df_lower = lower_tfs_data.get(tf)
+            if df_lower is None or len(df_lower) < 30:
+                continue
 
-                lows_lower = df_lower["low"]
-                closes_lower = df_lower["close"]
-                
-                ema9_lower = closes_lower.ewm(span=9, adjust=False).mean()
-                ema20_lower = closes_lower.ewm(span=20, adjust=False).mean()
-                ema50_lower = closes_lower.ewm(span=50, adjust=False).mean()
+            lows_lower = df_lower["low"]
+            closes_lower = df_lower["close"]
+            
+            ema9_lower = closes_lower.ewm(span=9, adjust=False).mean()
+            ema20_lower = closes_lower.ewm(span=20, adjust=False).mean()
 
-                # Golden Cross check
-                gc_ok = ema9_lower.iloc[-2] > ema20_lower.iloc[-2] and ema9_lower.iloc[-3] <= ema20_lower.iloc[-3]
-                
-                # Pullback checks (Low <= EMA, Close >= EMA)
-                pb_ema20 = lows_lower.iloc[-2] <= ema20_lower.iloc[-2] and closes_lower.iloc[-2] >= ema20_lower.iloc[-2]
-                pb_ema50 = lows_lower.iloc[-2] <= ema50_lower.iloc[-2] and closes_lower.iloc[-2] >= ema50_lower.iloc[-2]
+            # Golden Cross check
+            gc_ok = ema9_lower.iloc[-2] > ema20_lower.iloc[-2] and ema9_lower.iloc[-3] <= ema20_lower.iloc[-3]
+            
+            # Pullback checks (Low <= EMA, Close >= EMA)
+            pb_ema20 = lows_lower.iloc[-2] <= ema20_lower.iloc[-2] and closes_lower.iloc[-2] >= ema20_lower.iloc[-2]
 
-                if gc_ok:
-                    trigger_crossed = True
-                    trigger_tf = tf
-                    candlestick_pattern = "EMA9 > EMA20 Kesişimi (Golden Cross)"
-                    break
-                elif pb_ema20:
-                    trigger_crossed = True
-                    trigger_tf = tf
-                    candlestick_pattern = "EMA20 Pullback (Geri Çekilip Tutunma)"
-                    break
-                elif pb_ema50:
-                    trigger_crossed = True
-                    trigger_tf = tf
-                    candlestick_pattern = "EMA50 Pullback (Geri Çekilip Tutunma)"
-                    break
-        else:
-            # 15m veya 1h RSI dip dönüşü veya golden cross kontrolü
-            for tf in ["15m", "1h"]:
-                df_lower = lower_tfs_data.get(tf)
-                if df_lower is None or len(df_lower) < 30:
-                    continue
-
-                closes_lower = df_lower["close"]
-                rsi_lower = self.calculate_rsi(closes_lower, 14)
-                ema9_lower = closes_lower.ewm(span=9, adjust=False).mean()
-                ema20_lower = closes_lower.ewm(span=20, adjust=False).mean()
-
-                # RSI 30 yukarı kesim check (RSI[-2] > 30 ve RSI[-3] <= 30)
-                rsi_cross = rsi_lower.iloc[-2] > 30.0 and rsi_lower.iloc[-3] <= 30.0
-                
-                # Golden Cross check
-                gc_ok = ema9_lower.iloc[-2] > ema20_lower.iloc[-2] and ema9_lower.iloc[-3] <= ema20_lower.iloc[-3]
-
-                if rsi_cross:
-                    trigger_crossed = True
-                    trigger_tf = tf
-                    candlestick_pattern = "RSI 30 Yukarı Kesim (Aşırı Satım Dönüşü)"
-                    break
-                elif gc_ok:
-                    trigger_crossed = True
-                    trigger_tf = tf
-                    candlestick_pattern = "EMA9 > EMA20 Kesişimi (Dip Formasyonu Onayı)"
-                    break
+            if gc_ok:
+                trigger_crossed = True
+                trigger_tf = tf
+                candlestick_pattern = "EMA9 > EMA20 Kesişimi (Golden Cross)"
+                break
+            elif pb_ema20:
+                trigger_crossed = True
+                trigger_tf = tf
+                candlestick_pattern = "EMA20 Pullback (Geri Çekilip Tutunma)"
+                break
 
         # Enriched indicators for matplotlib signal rendering
         enriched_indicators = {
             "rsi_value": rsi_val,
-            "vol_ma": vol_ma,
-            "ema_50": ema50,
-            "ema_200": ema200
+            "vol_ma": vol_ma_15m,
+            "ema_50": ema50_1h,
+            "ema_200": ema200_1h
         }
         
         # If trigger tf is active, enrich lower indicators for chart overlay
